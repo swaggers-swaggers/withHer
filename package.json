@@ -70,8 +70,7 @@
           ]
         }
       ],
-      "icon": "assets/studydesk-icon.png",
-      "artifactName": "StudyDesk-${version}-${arch}-${target}.${ext}"
+      "icon": "assets/studydesk-icon.png"
     },
     "nsis": {
       "oneClick": false,
@@ -79,7 +78,11 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "StudyDesk-${version}-${arch}-nsis.${ext}"
+    },
+    "portable": {
+      "artifactName": "StudyDesk-${version}-${arch}-portable.${ext}"
     }
   },
   "devDependencies": {
