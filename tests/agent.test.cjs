@@ -193,18 +193,19 @@ test('local start is immediate, preserves window contract and does not make netw
   const { engine, wire } = setup(t); await engine.start(); assert.equal(engine.state().engine.status, 'ready'); assert.deepEqual(wire, []);
   assert.equal(engine.state().conversation.title, '大肥鱼'); assert.equal(engine.state().engine.name, 'Dafeyu'); assert.ok(!JSON.stringify(engine.state()).includes(vault.get()));
 });
-test('real tool loop preserves thinking, reads StudyDesk and publishes only the final answer', async t => {
+test('chat tool rounds use temperature 0.7 without thinking and publish only the final answer', async t => {
   const seen = [], notes = [{ id: 'n', body: '小猫今天学会开门了', updated_at: 1 }];
   const { engine, events } = setup(t, { studySnapshot: () => ({ ...snapshot(), notes }), remoteFetch: async (_, input) => {
     const b = JSON.parse(input.body); seen.push(b);
     if (seen.length === 1) return completion('让我分析和调用工具，这句不能展示', { tool_calls: [call('study_read', { area: 'notes' })] }, 'tool_calls');
-    assert.equal(b.messages[2].reasoning_content, 'PRIVATE REASONING'); assert.ok(b.messages[3].content.includes('小猫今天学会开门了'));
+    assert.equal(b.messages[2].reasoning_content, undefined); assert.ok(b.messages[3].content.includes('小猫今天学会开门了'));
     return completion('小猫这么聪明呀，我可要跟它较劲了。');
   } });
   await engine.start(); await engine.command('chat.send', { content: '看看我的随手记' }); await idle(engine);
   assert.equal(engine.store.messages().length, 2); assert.match(engine.store.messages()[1].content, /小猫/);
   assert.equal(events.filter(e => e.type === 'delivered').length, 1);
   assert.ok(!JSON.stringify(engine.state()).includes('PRIVATE REASONING')); assert.ok(!JSON.stringify(engine.state()).includes('让我分析'));
+  for (const request of seen) { assert.equal(request.temperature, 0.7); assert.deepEqual(request.thinking, { type: 'disabled' }); assert.equal(request.reasoning_effort, undefined); }
   const context = JSON.parse(seen[0].messages[1].content); assert.ok(context.relationship); assert.ok(context.motive.text);
 });
 test('probabilistic imagination is optional context in the actual reply request and leaves the base motive independent', async t => {
@@ -384,7 +385,7 @@ test('real chat tool loop can search and read original web content even when per
       assert.ok(b.messages.at(-1).content.includes('https://sqlite.org/wal.html'));
       return completion(null, { tool_calls: [call('web_fetch', { url: 'https://sqlite.org/wal.html' })] }, 'tool_calls');
     }
-    assert.ok(b.messages.at(-1).content.includes('Write-Ahead Logging')); assert.equal(b.messages[2].reasoning_content, 'PRIVATE REASONING');
+    assert.ok(b.messages.at(-1).content.includes('Write-Ahead Logging')); assert.equal(b.messages[2].reasoning_content, undefined);
     return completion('WAL 是 Write-Ahead Logging，来源：https://sqlite.org/wal.html');
   } });
   engine.store.setMeta('news_success_at', Date.now());

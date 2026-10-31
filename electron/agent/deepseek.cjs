@@ -58,10 +58,12 @@ class DeepSeek {
       return json;
     }
   }
-  async complete(messages, { tools, json = false, signal, maxTokens } = {}) {
+  async complete(messages, { tools, json = false, signal, maxTokens, thinking = true, temperature } = {}) {
     const body = { model: this.settings.model, messages, stream: false,
-      thinking: { type: 'enabled' }, reasoning_effort: this.settings.reasoning_effort,
+      thinking: { type: thinking ? 'enabled' : 'disabled' },
       max_tokens: maxTokens || this.settings.reply_max_tokens };
+    if (thinking) body.reasoning_effort = this.settings.reasoning_effort;
+    if (temperature !== undefined) body.temperature = temperature;
     if (tools?.length) body.tools = tools;
     if (json) body.response_format = { type: 'json_object' };
     const result = await this.request('/chat/completions', body, signal);
@@ -70,7 +72,8 @@ class DeepSeek {
     const raw = choice.message;
     if (raw.role && raw.role !== 'assistant') throw new ProviderError('回复格式无效');
     // This object stays within the tool loop. Only validated final content leaves it.
-    const message = { role: 'assistant', content: raw.content ?? null, reasoning_content: raw.reasoning_content || '' };
+    const message = { role: 'assistant', content: raw.content ?? null };
+    if (thinking) message.reasoning_content = raw.reasoning_content || '';
     if (raw.tool_calls?.length) {
       if (!Array.isArray(raw.tool_calls) || raw.tool_calls.length > this.settings.max_tools_per_round) throw new ProviderError('本轮工具调用过多');
       message.tool_calls = raw.tool_calls;

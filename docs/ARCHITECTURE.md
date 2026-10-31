@@ -79,6 +79,8 @@ Windows 数据目录为 `%APPDATA%\StudyDesk`；Linux 通常为 `~/.config/Study
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
+| `chat_temperature` | 0.7 | 聊天请求的温度参数，覆盖所有聊天工具轮次 |
+| `chat_thinking` | false | 聊天关闭思考，使temperature生效；后台整理仍开启思考 |
 | `reply_max_bubbles` | 64 | 每轮气泡资源上限，不是推荐数量 |
 | `reply_max_characters` | 32000 | 一组正文总长度上限 |
 | `reply_max_schedule_ms` | 86400000 | 一组累计等待上限，24小时 |
@@ -89,3 +91,5 @@ Windows 数据目录为 `%APPDATA%\StudyDesk`；Linux 通常为 `~/.config/Study
 | `contact_plan_min_gap_ms` | 120000 | 未来联系计划与最近消息的最低间隔 |
 
 旧 `reply_delay_probability`、`reply_delay_min_ms`、`reply_delay_max_ms` 在升级时移除。当前用户的 `dafeyu-config.json`、待说片段、计划和待发气泡都是私人数据，不应上传 GitHub。
+
+DeepSeek 思考模式会忽略 temperature，所以聊天请求使用 `thinking.type=disabled`，且不发送 `reasoning_effort`；后台 `object()` 请求仍按原来的思考模式执行。参考：[DeepSeek 官方说明](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。

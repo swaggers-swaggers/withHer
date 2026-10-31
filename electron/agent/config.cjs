@@ -29,6 +29,8 @@ function loadConfig(dataDir) {
     }
   }
   const config = { ...defaults, ...saved, thinking: { type: 'enabled' } };
+  if (!Number.isFinite(config.chat_temperature) || config.chat_temperature < 0 || config.chat_temperature > 2) config.chat_temperature = defaults.chat_temperature;
+  if (typeof config.chat_thinking !== 'boolean') config.chat_thinking = defaults.chat_thinking;
   config.timezone ||= Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   for (const key of ['fantasy_probability']) {
     if (!Number.isFinite(config[key]) || config[key] < 0 || config[key] > 1) config[key] = defaults[key];

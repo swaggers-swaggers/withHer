@@ -37,5 +37,7 @@
   "reply_max_bubbles": 64,
   "reply_max_schedule_ms": 86400000,
   "reply_max_characters": 32000,
-  "delivery_send_grace_ms": 10800000
+  "delivery_send_grace_ms": 10800000,
+  "chat_temperature": 0.7,
+  "chat_thinking": false
 }

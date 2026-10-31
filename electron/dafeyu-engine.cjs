@@ -98,7 +98,9 @@ class DafeyuEngine {
         break;
       case 'connection.check':
         if (this.active) throw new ProviderError('请等待当前回复结束');
-        await this.provider.complete([{ role: 'user', content: '只回复“好”。' }]); break;
+        await this.provider.complete([{ role: 'user', content: '只回复“好”。' }], {
+          thinking: this.config.chat_thinking, temperature: this.config.chat_temperature,
+        }); break;
       case 'engine.start': await this.start(); this.config.enabled = true; this.save(); break;
       case 'engine.stop': this.config.enabled = false; this.save(); await this.stop(); break;
       default: throw new ProviderError('不支持的聊天操作');
@@ -327,7 +329,8 @@ class DafeyuEngine {
     for (let round = 0; round <= this.config.max_tool_rounds; round++) {
       signal.throwIfAborted();
       const finalRound = round === this.config.max_tool_rounds;
-      const message = await this.provider.complete(messages, { tools: finalRound ? undefined : TOOLS, signal });
+      const message = await this.provider.complete(messages, { tools: finalRound ? undefined : TOOLS, signal,
+        thinking: this.config.chat_thinking, temperature: this.config.chat_temperature });
       if (!message.tool_calls?.length) { response = parseReplyPlan(message.content, this.config); break; }
       if (finalRound) throw new ProviderError('本轮查询较多，请换个说法再试');
       messages.push(message);

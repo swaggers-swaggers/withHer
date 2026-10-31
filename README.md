@@ -57,8 +57,8 @@ npm run package:win
 
 输出到 `release/`：
 
-- `StudyDesk-2.4.0-x64-nsis.exe`：安装程序，支持选择目录、桌面和开始菜单快捷方式。
-- `StudyDesk-2.4.0-x64-portable.exe`：免安装程序。应用数据仍保存在当前 Windows 用户的数据目录。
+- `StudyDesk-2.4.1-x64-nsis.exe`：安装程序，支持选择目录、桌面和开始菜单快捷方式。
+- `StudyDesk-2.4.1-x64-portable.exe`：免安装程序。应用数据仍保存在当前 Windows 用户的数据目录。
 
 也可以打开仓库的 **Actions → Build and check**，从成功的 Windows 任务下载 `StudyDesk-Windows-x64` 构建产物。构建不需要你的 DeepSeek 密钥，不会调用真实模型。当前构建未配置代码签名证书。
 
@@ -69,7 +69,7 @@ npm run package:win
 ```bash
 npm run pack
 npm run package:deb
-sudo apt install ./release/StudyDesk-2.4.0-amd64.deb
+sudo apt install ./release/StudyDesk-2.4.1-amd64.deb
 ```
 
 `pack` 会准备 Chromium sandbox；本机已有配置正确的 Chrome helper 时可复用。若提示缺少启动组件，先执行 `npx electron-builder --linux dir --publish never` 生成目录，再运行 `npm run package:deb` 并安装 deb，之后从应用列表打开。不要通过关闭 sandbox 来解决启动问题。
@@ -82,7 +82,7 @@ sudo apt install ./release/StudyDesk-2.4.0-amd64.deb
 2. 填入**你自己的** DeepSeek API 密钥；确认账号可使用的模型名称，保存设置。
 3. 点击“启用聊天”。不配置密钥也可以使用待办、计时、笔记和统计。
 
-默认模型名称保存在 `companion/engine-settings.json`，当前为 `deepseek-flash`。模型、余额和搜索/网页读取接口的可用性取决于服务商与账号；本仓库不附带任何密钥，也不承诺特定账号可用全部联网功能。
+默认模型名称保存在 `companion/engine-settings.json`，当前为 `deepseek-flash`。聊天使用 `temperature: 0.7` 并关闭思考模式，使温度参数生效；记忆整理、幻想等后台模块仍保留思考模式。模型、余额和搜索/网页读取接口的可用性取决于服务商与账号；本仓库不附带任何密钥，也不承诺特定账号可用全部联网功能。
 
 密钥通过 Electron `safeStorage` 和操作系统提供的能力加密保存。加密不可用时只在本次运行中保留；也支持通过进程环境变量 `DEEPSEEK_API_KEY` 提供密钥，避免将它写进源码或配置模板。
 
