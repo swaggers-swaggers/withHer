@@ -256,3 +256,17 @@ test('delayed tool effects commit once after restart, never before delivery', as
   assert.equal(second.unsaid.summary().count, 1); assert.equal(second.unsaid.state().revision, 1);
   await second.stop({ preservePending: true }); second.close(); const third = c.make(); await third.start(); await idle(third); assert.equal(third.unsaid.state().revision, 1);
 });
+
+test('silently skipped contact cannot mark an unspoken life story shared or commit a pending life activity', async t => {
+  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 }, remoteFetch: async () => completion(null, [
+    call('life_mark_shared', { ids: ['synthetic-life'] }),
+    call('life_plan', { title: '不应开始', description: '这是被取消消息里尚未提交的活动', duration_minutes: 10 }),
+    call('contact_plan_decide', { action: 'skip' }),
+  ]) });
+  c.engine.store.db.prepare("INSERT INTO life_activities(id,title,description,started_at,due_at,finished_at,status,record) VALUES(?,?,?,?,?,?,?,?)")
+    .run('synthetic-life', '合成小故事', '合成活动', c.now()-60000, c.now(), c.now(), 'complete', '合成生活记录');
+  installPlan(c.engine); c.advance(60000); await c.engine.start(); await c.engine.tick(); await idle(c.engine);
+  assert.equal(c.engine.life.current(), null);
+  assert.equal(c.engine.store.db.prepare('SELECT shared_at FROM life_activities WHERE id=?').get('synthetic-life').shared_at, null);
+  assert.equal(c.events.filter(e=>e.type==='delivered').length, 0);
+});

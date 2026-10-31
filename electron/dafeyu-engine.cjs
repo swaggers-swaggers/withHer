@@ -311,7 +311,13 @@ class DafeyuEngine {
       if (job.planDecision && job.planDecision.action !== 'send') {
         signal.throwIfAborted();
         if (!this.autonomousAllowed(job)) { this.plans.release(job.plan.id); return; }
-        this.store.transaction(() => { this.commitEffects(job); this.plans.resolve(job.plan.id, job.planDecision); });
+        this.store.transaction(() => {
+          // A silent decision may retain new private intentions, but nothing
+          // has been shared: discard message-dependent life/memory effects.
+          if (job.unsaidCandidate) this.unsaid.commit(job.unsaidCandidate);
+          if (job.planCandidate) this.plans.commit(job.planCandidate);
+          this.plans.resolve(job.plan.id, job.planDecision);
+        });
         this.changed(); return;
       }
     }
