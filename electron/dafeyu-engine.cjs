@@ -1,6 +1,6 @@
 const { AgentStore, CONVERSATION } = require('./agent/store.cjs');
 const { loadConfig, writeJSON, prompt, persona, tokens } = require('./agent/config.cjs');
-const { DeepSeek, ProviderError, visibleReply } = require('./agent/deepseek.cjs');
+const { DeepSeek, ProviderError } = require('./agent/deepseek.cjs');
 const { StudyReader } = require('./agent/study.cjs');
 const { Relationship, evidenceFor } = require('./agent/relationship.cjs');
 const { FactMemory } = require('./agent/memory.cjs');
@@ -14,10 +14,11 @@ const { OwnLife } = require('./agent/life.cjs');
 const { Unsaid } = require('./agent/unsaid.cjs');
 const { Imagination } = require('./agent/imagination.cjs');
 const { ContactPlans } = require('./agent/contact-plans.cjs');
-const { DeliveryOutbox, replyDelay } = require('./agent/delivery.cjs');
-const { setTimeout: sleep } = require('node:timers/promises');
+const { DeliveryOutbox } = require('./agent/delivery.cjs');
+const { parseReplyPlan } = require('./agent/reply-plan.cjs');
 const background = kind => kind === 'maintenance' || kind === 'life';
 const autonomous = kind => kind === 'proactive' || kind === 'planned';
+const generating = job => !!job && !background(job.kind) && !job.outboxId;
 
 class DafeyuEngine {
   constructor(dataDir, vault, options) {
@@ -25,7 +26,6 @@ class DafeyuEngine {
     this.now = options.now || Date.now; this.random = options.random || Math.random;
     const loaded = loadConfig(dataDir); this.config = { ...loaded.config, ...options.settings }; this.configFile = loaded.file;
     this.store = new AgentStore(dataDir);
-    this.wait = options.wait || ((ms, signal) => sleep(ms, undefined, { signal }));
     this.unsaid = new Unsaid(this.store, this.now);
     this.plans = new ContactPlans(this.store, this.config, this.now);
     this.outbox = new DeliveryOutbox(this.store, this.config, this.now);
@@ -52,7 +52,7 @@ class DafeyuEngine {
   }
   state() {
     return { conversation: { id: CONVERSATION, title: '大肥鱼' }, messages: this.store.messages(), config: { model: this.config.model },
-      credentials: this.vault.status(), busy: this.busy, waiting: !!this.active?.waiting,
+      credentials: this.vault.status(), busy: this.busy, waiting: this.outbox.hasPending(),
       engine: { name: 'Dafeyu', status: this.status, error: this.error, paused: this.manualPause,
         studyMemoryError: this.study.error || this.store.meta('memory_error', ''),
         memoryCursor: this.store.meta('memory_cursor', 0), relationshipRevision: this.store.relationship()?.revision,
@@ -71,9 +71,12 @@ class DafeyuEngine {
         if (this.queue.filter(t => t.kind === 'user').length >= 8) throw new ProviderError('还有几条消息正在处理，请稍等');
         this.error = ''; this.manualPause = false;
         this.discardPending();
-        if (this.active && (this.active.kind !== 'user' || this.active.waiting)) this.active.controller.abort();
-        for (const job of this.queue) if (job.kind !== 'user' && job.plan) this.plans.release(job.plan.id);
-        this.queue = this.queue.filter(job => job.kind === 'user');
+        this.active?.controller.abort();
+        for (const job of this.queue) {
+          if (job.plan) this.plans.release(job.plan.id);
+          if (job.message) this.store.db.prepare("UPDATE messages SET status='interrupted' WHERE id=? AND status='pending'").run(job.message.id);
+        }
+        this.queue = []; this.store.setMeta('response_quiet_until', 0);
         const message = this.store.addMessage('user', input.content.trim(), this.now(), { status: 'pending' });
         this.enqueue({ kind: 'user', message });
         break;
@@ -111,14 +114,31 @@ class DafeyuEngine {
     // Start is local and immediate. No network is required to open existing records.
     this.timer = setInterval(() => { void this.tick().catch(e => this.report(e)); }, this.config.tick_ms);
     this.timer.unref?.(); this.changed();
-    for (const row of this.outbox.pending()) {
-      const message = row.source_message_id ? this.store.db.prepare('SELECT id,seq FROM messages WHERE id=?').get(row.source_message_id) : null;
-      if (row.source_message_id && !message) { this.outbox.cancel(row.id); continue; }
-      this.enqueue({ kind: row.kind, message, baseline: row.baseline_seq, outboxId: row.id, plan: row.plan_id ? this.plans.get(row.plan_id) : null });
-    }
+    this.armDelivery();
+  }
+  armDelivery() {
+    clearTimeout(this.deliveryTimer);
+    if (this.closed || this.status !== 'ready' || this.manualPause) return;
+    const row = this.outbox.pending()[0]; if (!row) return;
+    if (this.active?.outboxId === row.id || this.queue.some(j => j.outboxId === row.id)) return;
+    const due = Math.min(row.due_at, row.expires_at);
+    this.deliveryTimer = setTimeout(() => {
+      this.deliveryTimer = null;
+      if (this.closed || this.status !== 'ready' || this.manualPause) return;
+      if (this.active && background(this.active.kind)) this.active.controller.abort();
+      this.queueDelivery(row.id);
+    }, Math.max(0, due - this.now()));
+    this.deliveryTimer.unref?.();
+  }
+  queueDelivery(id) {
+    const row = this.outbox.get(id);
+    if (!row || row.status !== 'pending' || this.active?.outboxId === id || this.queue.some(j => j.outboxId === id)) return;
+    const message = row.source_message_id ? this.store.db.prepare('SELECT id,seq FROM messages WHERE id=?').get(row.source_message_id) : null;
+    if (row.source_message_id && !message) { this.outbox.cancel(id); return; }
+    this.enqueue({ kind: row.kind, message, baseline: row.baseline_seq, outboxId: row.id, plan: row.plan_id ? this.plans.get(row.plan_id) : null });
   }
   enqueue(job) {
-    this.queue.push(job); this.busy = this.queue.some(j => !background(j.kind)) || !!this.active && !background(this.active.kind); this.changed();
+    this.queue.push(job); this.busy = this.queue.some(generating) || generating(this.active); this.changed();
     if (!this.draining) this.draining = Promise.resolve().then(() => this.drain()).finally(() => { this.draining = null; if (this.queue.length) this.enqueueDrain(); });
   }
   enqueueDrain() { if (!this.draining) this.draining = this.drain().finally(() => { this.draining = null; if (this.queue.length) this.enqueueDrain(); }); }
@@ -145,17 +165,19 @@ class DafeyuEngine {
           }
           else { this.report(e); this.emit({ type: 'error', message: this.error }); }
         }
-      } finally { this.active = null; this.busy = this.queue.some(j => !background(j.kind)); this.changed(); }
+      } finally { this.active = null; this.busy = this.queue.some(generating); this.changed(); }
     }
-    this.busy = false; this.changed();
+    this.busy = false; this.changed(); this.armDelivery();
   }
   discardPending() {
+    clearTimeout(this.deliveryTimer);
     for (const row of this.outbox.pending()) {
       this.outbox.cancel(row.id);
       if (row.plan_id) this.plans.release(row.plan_id);
     }
   }
   async cancel({ preservePending = false } = {}) {
+    clearTimeout(this.deliveryTimer);
     if (!preservePending) this.discardPending();
     for (const job of this.queue) if (job.message && !(preservePending && job.outboxId)) this.store.db.prepare("UPDATE messages SET status='interrupted' WHERE id=?").run(job.message.id);
     for (const job of this.queue) if (job.plan && !(preservePending && job.outboxId)) this.plans.release(job.plan.id);
@@ -174,6 +196,19 @@ class DafeyuEngine {
     if (this.status !== 'ready' || this.closed || this.manualPause) return;
     this.publishStudy(); await this.syncPresence();
     if (this.active || this.queue.length) return;
+    const pending = this.outbox.pending()[0];
+    if (pending && Math.min(pending.due_at, pending.expires_at) <= this.now()) { this.queueDelivery(pending.id); return; }
+    if (pending) {
+      this.armDelivery();
+      if (this.memory.due() || this.news.due()) this.enqueue({ kind: 'maintenance' });
+      else if (this.life.due()) this.enqueue({ kind: 'life' });
+      return;
+    }
+    if (this.store.meta('response_quiet_until', 0) > this.now()) {
+      if (this.memory.due() || this.news.due()) this.enqueue({ kind: 'maintenance' });
+      else if (this.life.due()) this.enqueue({ kind: 'life' });
+      return;
+    }
     const p = this.presence(), plan = this.plans.due();
     if (plan && p.available && !p.focus && this.typingUntil <= this.now() &&
         this.now() - this.store.lastEvent() >= this.config.contact_plan_min_gap_ms) {
@@ -181,7 +216,7 @@ class DafeyuEngine {
       if (claimed) { this.enqueue({ kind: 'planned', plan: claimed, baseline: this.store.latestSeq(), trigger: 'contact-plan' }); return; }
     }
     const decision = eligible({ now: this.now(), presence: this.presence(), busy: this.busy, paused: this.manualPause,
-      typingUntil: this.typingUntil, lastEvent: this.store.lastEvent(), startedAt: this.startedAt,
+      typingUntil: this.typingUntil, lastEvent: Math.max(this.store.lastEvent(), this.store.meta('response_decision_at', 0)), startedAt: this.startedAt,
       lastAttempt: this.store.meta('proactive_attempt_at', 0), settings: this.config, random: this.random });
     if (decision.trigger) {
       this.store.setMeta('proactive_attempt_at', this.now());
@@ -267,6 +302,9 @@ class DafeyuEngine {
       trigger: job.kind === 'user' ? 'user' : job.kind === 'planned' ? 'planned' : 'proactive',
       scheduled_contact: job.plan ? { id: job.plan.id, key: job.plan.key, intent: job.plan.intent, due_at: job.plan.due_at, expires_at: job.plan.expires_at } : null,
       unsaid_available: this.unsaid.summary(), contact_plans_available: this.plans.summary(),
+      delivery_contract: { max_bubbles: this.config.reply_max_bubbles, max_total_characters: this.config.reply_max_characters,
+        max_total_wait_ms: this.config.reply_max_schedule_ms, first_after_ms_min: 0, subsequent_after_ms_min: 1,
+        note: '这些只是资源上限，不是推荐数量。你自主决定沉默或发送，气泡边界和每个间隔。' },
       dialogue,
       dialogue_meta: { limit: 200, count: dialogue.length, content_truncated: false, token_budget_applied: false,
         first_message_id: dialogue[0]?.id || null, last_message_id: dialogue.at(-1)?.id || null },
@@ -284,13 +322,13 @@ class DafeyuEngine {
     // Only this turn's assistant
     // tool protocol enters API messages, preserving all its reasoning verbatim.
     const directory = this.config.prompt_directory;
-    const messages = [{ role: 'system', content: persona(directory) + '\n\n' + prompt('reply', directory) + '\n\n' + prompt('short-term', directory) + '\n\n' + prompt('web', directory) + '\n\n' + prompt('life-context', directory) + '\n\n' + prompt('conversation-v23', directory) }, { role: 'user', content: JSON.stringify(context) }];
-    let content;
+    const messages = [{ role: 'system', content: persona(directory) + '\n\n' + prompt('reply', directory) + '\n\n' + prompt('short-term', directory) + '\n\n' + prompt('web', directory) + '\n\n' + prompt('life-context', directory) + '\n\n' + prompt('conversation-v23', directory) + '\n\n' + prompt('bubble-policy-v24', directory) }, { role: 'user', content: JSON.stringify(context) }];
+    let response;
     for (let round = 0; round <= this.config.max_tool_rounds; round++) {
       signal.throwIfAborted();
       const finalRound = round === this.config.max_tool_rounds;
       const message = await this.provider.complete(messages, { tools: finalRound ? undefined : TOOLS, signal });
-      if (!message.tool_calls?.length) { content = visibleReply(message.content); break; }
+      if (!message.tool_calls?.length) { response = parseReplyPlan(message.content, this.config); break; }
       if (finalRound) throw new ProviderError('本轮查询较多，请换个说法再试');
       messages.push(message);
       for (const call of message.tool_calls) {
@@ -317,19 +355,33 @@ class DafeyuEngine {
           if (job.unsaidCandidate) this.unsaid.commit(job.unsaidCandidate);
           if (job.planCandidate) this.plans.commit(job.planCandidate);
           this.plans.resolve(job.plan.id, job.planDecision);
+          this.store.setMeta('response_decision_at', this.now());
         });
         this.changed(); return;
       }
     }
     signal.throwIfAborted();
-    if (!content) throw new ProviderError('这次没有生成完整回复，请重试');
+    if (!response) throw new ProviderError('这次没有生成完整的发送安排，请重试');
     if (autonomous(job.kind) && !this.autonomousAllowed(job)) { if (job.plan) this.plans.release(job.plan.id); return; }
-    const delay = job.kind === 'planned' ? 0 : replyDelay(this.config, this.random);
-    const effects = { lifePlan: job.lifePlan, lifeShared: job.lifeShared, shortTermCandidate: job.shortTermCandidate,
-      relationshipCandidate: job.relationshipCandidate, unsaidCandidate: job.unsaidCandidate, planCandidate: job.planCandidate,
-      motive: context.motive.text, fantasyUsed: !!job.fantasy, trigger: job.trigger || 'user' };
-    const row = this.outbox.stage(job, content, effects, delay); job.outboxId = row.id;
-    await this.deliver(job);
+    this.store.transaction(() => {
+      // Private intentions are valid once the model has made a valid decision;
+      // they do not mean any words have already reached the conversation.
+      this.commitEffects({ ...job, lifeShared: undefined });
+      this.store.setMeta('response_decision_at', this.now());
+      if (response.decision === 'silent') {
+        if (response.resume_after_ms !== undefined) this.store.setMeta('response_quiet_until', this.now() + response.resume_after_ms);
+        if (job.message) this.store.db.prepare("UPDATE messages SET status='complete' WHERE id=?").run(job.message.id);
+        if (job.plan) this.plans.finish(job.plan.id);
+        this.store.log('response.silent', { sourceId: job.message?.id || null, resumeAfterMs: response.resume_after_ms ?? null }, this.now());
+      } else {
+        const row = this.outbox.stage(job, response, { lifeShared: job.lifeShared,
+          motive: context.motive.text, fantasyUsed: !!job.fantasy, trigger: job.trigger || 'user' });
+        job.outboxId = row.id;
+        this.store.log('response.plan', { bubbles: response.bubbles.length, totalWaitMs: response.bubbles.reduce((n, b) => n + b.after_ms, 0) }, this.now());
+      }
+    });
+    if (job.lifePlan) this.life.publish();
+    this.error = ''; this.changed(); this.armDelivery();
   }
   autonomousAllowed(job) {
     const p = this.presence();
@@ -345,41 +397,34 @@ class DafeyuEngine {
     if (effects.relationshipCandidate) this.store.saveRelationship(effects.relationshipCandidate, [effects.message.id], 'significant', this.now());
   }
   async deliver(job) {
-    const signal = job.controller.signal;
-    let row = this.outbox.get(job.outboxId);
+    const row = this.outbox.get(job.outboxId);
     if (!row || row.status !== 'pending') return;
+    job.controller.signal.throwIfAborted();
     if (!this.deliveryAllowed(row, job)) { this.outbox.cancel(row.id); if (job.plan) this.plans.release(job.plan.id); return; }
-    job.waiting = row.due_at > this.now(); this.changed();
-    while (row.due_at > this.now()) {
-      signal.throwIfAborted();
-      await this.wait(Math.min(row.due_at - this.now(), row.expires_at - this.now()), signal);
-      if (row.expires_at <= this.now()) break;
-    }
-    signal.throwIfAborted();
-    row = this.outbox.get(job.outboxId);
-    if (!row || row.status !== 'pending') return;
-    if (!this.deliveryAllowed(row, job)) {
-      this.outbox.cancel(row.id); if (job.plan) this.plans.release(job.plan.id); return;
-    }
-    const effects = { ...row.payload, message: job.message };
+    const bubble = this.outbox.next(row.id);
+    if (!bubble || bubble.due_at > this.now()) return;
+    let complete;
     this.store.transaction(() => {
-      this.commitEffects(effects);
-      this.store.addMessage('assistant', row.content, this.now(), { origin: job.kind === 'planned' ? 'planned' : job.kind === 'proactive' ? 'proactive' : 'dafeyu', replyTo: job.message?.seq || null });
-      if (job.message) this.store.db.prepare("UPDATE messages SET status='complete' WHERE id=?").run(job.message.id);
-      if (job.plan) this.plans.finish(job.plan.id);
-      if (!this.outbox.sent(row.id)) throw new Error('回复已经处理');
-      this.store.log('reply', { autonomous: autonomous(job.kind), motive: effects.motive,
-        fantasyUsed: effects.fantasyUsed, trigger: effects.trigger, delayedMs: row.due_at - row.created_at }, this.now());
+      const message = this.store.addMessage('assistant', bubble.content, this.now(), {
+        origin: job.kind === 'planned' ? 'planned' : job.kind === 'proactive' ? 'proactive' : 'dafeyu',
+        replyTo: job.message?.seq || null, segments: [{ type: 'model_bubble', data: { kind: bubble.kind, deliveryId: row.id, position: bubble.position } }],
+      });
+      complete = this.outbox.advance(row.id, bubble.position, message);
+      if (complete) {
+        if (row.payload.lifeShared?.length) this.life.markShared(row.payload.lifeShared);
+        if (job.message) this.store.db.prepare("UPDATE messages SET status='complete' WHERE id=?").run(job.message.id);
+        if (job.plan) this.plans.finish(job.plan.id);
+      }
+      this.store.log('bubble.sent', { deliveryId: row.id, position: bubble.position, afterMs: bubble.gap_ms, complete }, this.now());
     });
-    if (effects.lifePlan || effects.lifeShared?.length) this.life.publish();
+    if (complete && row.payload.lifeShared?.length) this.life.publish();
     this.error = ''; this.changed();
-    this.emit({ type: 'delivered', conversationId: CONVERSATION, content: row.content, autonomous: autonomous(job.kind) });
+    this.emit({ type: 'delivered', conversationId: CONVERSATION, content: bubble.content, autonomous: autonomous(job.kind) });
   }
   deliveryAllowed(row, job) {
     const newerUser = job.message && this.store.db.prepare("SELECT 1 FROM messages WHERE role='user' AND seq>? LIMIT 1").get(job.message.seq);
-    return row.expires_at > this.now() && (!autonomous(job.kind) || this.autonomousAllowed(job)) &&
-      !(newerUser && row.due_at > row.created_at);
+    return row.expires_at > this.now() && (!autonomous(job.kind) || this.autonomousAllowed(job)) && !newerUser;
   }
-  close() { this.closed = true; clearInterval(this.timer); this.active?.controller.abort(); this.queue = []; this.store.close(); }
+  close() { this.closed = true; clearInterval(this.timer); clearTimeout(this.deliveryTimer); this.active?.controller.abort(); this.queue = []; this.store.close(); }
 }
 module.exports = { DafeyuEngine };

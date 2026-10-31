@@ -26,6 +26,9 @@ function presentMessage(message) {
   try { segments = JSON.parse(message.segments_json || '[]'); }
   catch { segments = []; }
   if (!Array.isArray(segments)) segments = [];
+  const modelBubble = segments.find(part => part?.type === 'model_bubble');
+  if (modelBubble) return { ...message, displayContent: content, displayParts: [content],
+    displayKinds: [modelBubble.data?.kind === 'code' ? 'code' : 'text'], quotes: [] };
   const references = segments.filter(part => part?.type === 'reply' && part.data && typeof part.data === 'object');
   if (!references.length) return { ...message, displayContent: content, ...display(content), quotes: [] };
   const string = value => typeof value === 'string' ? value : '';

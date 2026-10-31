@@ -8,265 +8,201 @@ const { DafeyuEngine } = require('../electron/dafeyu-engine.cjs');
 const { ContactPlans } = require('../electron/agent/contact-plans.cjs');
 const { Unsaid } = require('../electron/agent/unsaid.cjs');
 const { Imagination } = require('../electron/agent/imagination.cjs');
-const { replyDelay } = require('../electron/agent/delivery.cjs');
+const { parseReplyPlan } = require('../electron/agent/reply-plan.cjs');
 const { defaults } = require('../electron/agent/config.cjs');
 const { waitForCondition } = require('./helpers.cjs');
 const vault = { get: () => 'synthetic-local-credential', status: () => ({ configured: true, storage: 'session', error: '' }) };
-const completion = (content = '一会儿再聊这个小故事。', calls) => new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content, reasoning_content: 'PRIVATE_REASONING', ...(calls ? { tool_calls: calls } : {}) }, finish_reason: calls ? 'tool_calls' : 'stop' }] }), { headers: { 'Content-Type': 'application/json' } });
+const send = (...bubbles) => ({ decision: 'send', bubbles: bubbles.map(b => typeof b === 'string' ? { text: b, after_ms: 0 } : b) });
+const completion = (plan = send('合成的回复'), calls) => new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: calls ? null : JSON.stringify(plan), reasoning_content: 'PRIVATE_REASONING', ...(calls ? { tool_calls: calls } : {}) }, finish_reason: calls ? 'tool_calls' : 'stop' }] }), { headers: { 'Content-Type': 'application/json' } });
 const call = (name, args) => ({ id: name, type: 'function', function: { name, arguments: JSON.stringify(args) } });
-const idle = e => waitForCondition(() => !e.draining && !e.active && !e.queue.length, 5000);
+const drained = e => waitForCondition(() => !e.draining && !e.active && !e.queue.length, 5000);
+const settled = e => waitForCondition(() => !e.draining && !e.active && !e.queue.length && !e.outbox.hasPending(), 5000);
 function setup(t, options = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conversation-test-')), events = [], engines = [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubble-contract-test-')), events = [], engines = [];
   let at = 100_000_000;
   const make = overrides => {
-    const engine = new DafeyuEngine(dir, vault, { now: () => at, random: () => 0.5,
-      emit: e => events.push(e), presence: () => ({ available: true, focus: false }),
-      studySnapshot: () => ({ todos: [], notes: [], timer: { status: 'idle' }, learning: {} }), remoteFetch: async () => completion(),
-      ...options, ...overrides, settings: { reply_delay_probability: 0, fantasy_probability: 0, life_enabled: false, ...options.settings, ...overrides?.settings } });
+    const engine = new DafeyuEngine(dir, vault, { now: () => at, random: () => .5, emit: e => events.push(e),
+      presence: () => ({ available: true, focus: false }), studySnapshot: () => ({ todos: [], notes: [], timer: { status: 'idle' }, learning: {} }),
+      remoteFetch: async () => completion(), ...options, ...overrides,
+      settings: { fantasy_probability: 0, life_enabled: false, tick_ms: 3600000, ...options.settings, ...overrides?.settings } });
     engines.push(engine); return engine;
   };
   const engine = make();
   t.after(async () => { for (const e of engines) if (!e.closed) { await e.stop(); e.close(); } fs.rmSync(dir, { recursive: true, force: true }); });
   return { engine, dir, events, make, now: () => at, advance: ms => { at += ms; } };
 }
-const planOp = (key = 'story', extra = {}) => ({ action: 'upsert', key, intent: '到时候分享一个虚构的小故事', after_minutes: 1, ...extra });
+const planOp = (key = 'story', extra = {}) => ({ action: 'upsert', key, intent: '到时候分享一个合成的小故事', after_minutes: 1, ...extra });
 const installPlan = (e, op = planOp()) => { e.plans.commit(e.plans.plan([op])); return e.plans.read().items[0]; };
-function gate() {
-  let release;
-  const promise = new Promise(r => { release = r; });
-  return { release, wait: (ms, signal) => new Promise((resolve, reject) => {
-    const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason); };
-    if (signal.aborted) return abort();
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(() => { signal.removeEventListener('abort', abort); resolve(); });
-  }) };
-}
+const assistant = e => e.store.messages().filter(m => m.role === 'assistant');
+async function turn(c, text = '合成输入') { await c.engine.start(); await c.engine.command('chat.send', { content: text }); await drained(c.engine); }
+async function step(c, ms) { c.advance(ms); await c.engine.tick(); await drained(c.engine); }
 
-test('unsaid uses stable keys, supports read/edit/remove and persists independently of facts and messages', t => {
-  const { engine, dir } = setup(t), u = engine.unsaid;
-  u.commit(u.plan([{ action: 'upsert', key: 'cloud', text: '下次想讲一朵云的小故事。' }]));
-  u.commit(u.plan([{ action: 'upsert', key: 'cloud', text: '改成一朵迷路的云。' }], undefined));
-  assert.equal(u.summary().count, 1); assert.equal(u.read().items[0].text, '改成一朵迷路的云。');
-  assert.equal(engine.store.messages().length, 0); assert.equal(engine.store.factContext().length, 0);
-  const second = new AgentStore(dir); assert.equal(new Unsaid(second).read().items.length, 1); second.close();
-  assert.throws(() => u.plan([{ action: 'upsert', key: 'bad', text: '分析步骤：隐藏的推理' }]));
-  const stale = u.plan([{ action: 'remove', key: 'cloud' }]); u.commit(u.plan([{ action: 'upsert', key: 'second', text: '另一个片段' }]));
-  assert.throws(() => u.commit(stale));
-  u.commit(u.plan([{ action: 'remove', key: 'cloud' }])); assert.equal(u.read().items[0].key, 'second');
+test('the model chooses silence, one bubble or many, without a text/random fallback', () => {
+  assert.deepEqual(parseReplyPlan(JSON.stringify({ decision: 'silent', bubbles: [] }), defaults), { decision: 'silent', bubbles: [] });
+  assert.equal(parseReplyPlan(JSON.stringify(send('整句放在同一气泡')), defaults).bubbles.length, 1);
+  const many = Array.from({ length: 20 }, (_, i) => ({ text: `兴奋的第${i}句！`, after_ms: i ? 10 : 0 }));
+  assert.equal(parseReplyPlan(JSON.stringify(send(...many)), defaults).bubbles.length, 20);
+  for (const raw of ['普通正文', '```json\n{}\n```', JSON.stringify({ reply: '旧协议' })]) assert.throws(() => parseReplyPlan(raw, defaults));
 });
-test('unsaid remains opt-in: initial context contains counts, tools read and edit prospective state, UI never gets draft text', async t => {
-  let step = 0; const seen = [];
-  const { engine } = setup(t, { remoteFetch: async (_, input) => {
-    const b = JSON.parse(input.body); seen.push(b);
-    if (step++ === 0) {
-      const c = JSON.parse(b.messages[1].content); assert.equal(c.unsaid_available.count, 1); assert.ok(!b.messages[1].content.includes('SYNTHETIC_PRIVATE_DRAFT'));
-      return completion(null, [call('unsaid_read', {}), call('unsaid_update', { operations: [{ action: 'upsert', key: 'draft', text: '新的角色待说片段' }] })]);
-    }
-    assert.ok(b.messages.find(m => m.role === 'tool' && m.tool_call_id === 'unsaid_read').content.includes('SYNTHETIC_PRIVATE_DRAFT'));
-    return completion('今天先和你聊聊云。');
-  } });
-  engine.unsaid.commit(engine.unsaid.plan([{ action: 'upsert', key: 'draft', text: 'SYNTHETIC_PRIVATE_DRAFT' }]));
-  await engine.start(); await engine.command('chat.send', { content: '嗨' }); await idle(engine);
-  assert.equal(engine.unsaid.read().items[0].text, '新的角色待说片段');
-  assert.ok(!JSON.stringify(engine.state()).includes('新的角色待说片段')); assert.ok(!JSON.stringify(engine.state()).includes('PRIVATE_REASONING'));
+test('model-selected newlines and punctuation stay in one bubble; code indentation survives', () => {
+  const p = parseReplyPlan(JSON.stringify(send({ text: '先说一句。\n还有一段！', after_ms: 0 }, { text: '  x = 1\n  print(x)', kind: 'code', after_ms: 300 })), defaults);
+  assert.equal(p.bubbles[0].text, '先说一句。\n还有一段！'); assert.equal(p.bubbles[1].text, '  x = 1\n  print(x)');
 });
-test('failed final reply rolls back unsaid edits and contact plans together', async t => {
-  let step = 0;
-  const { engine } = setup(t, { remoteFetch: async () => step++ === 0 ? completion(null, [call('unsaid_update', { operations: [{ action: 'upsert', key: 'x', text: '先不说的内容' }] }), call('contact_plan_update', { operations: [planOp()] })]) : completion('分析步骤：无效正文') });
-  await engine.start(); await engine.command('chat.send', { content: '嗨' }); await idle(engine);
-  assert.equal(engine.unsaid.summary().count, 0); assert.equal(engine.plans.summary().active_count, 0); assert.equal(engine.outbox.pending().length, 0);
+test('every later bubble needs an explicit positive interval; invalid decisions or hidden analysis never display', () => {
+  for (const p of [send({ text: 'a', after_ms: 0 }, { text: 'b', after_ms: 0 }), send({ text: 'a', after_ms: -1 }), send({ text: 'a', after_ms: 1.5 }),
+    { decision: 'silent', bubbles: [{ text: '不能假装沉默', after_ms: 0 }] }, send({ text: '分析步骤：不可显示', after_ms: 0 }),
+    { decision: 'send', bubbles: [{ text: 'a', after_ms: 0 }], analysis: 'hidden' }]) assert.throws(() => parseReplyPlan(JSON.stringify(p), defaults));
+  assert.throws(() => parseReplyPlan(JSON.stringify(send(...Array.from({ length: 65 }, () => ({ text: 'x', after_ms: 1 })))), defaults));
+  assert.throws(() => parseReplyPlan(JSON.stringify(send({ text: 'x', after_ms: 86400001 })), defaults));
 });
-test('fantasy RNG can skip the provider entirely and needs no temporary motive', async t => {
-  const { engine } = setup(t); let calls = 0;
-  const i = new Imagination(engine.store, { object: async () => { calls++; return { fantasy: '漂浮的虚构小岛', motive: 'unused legacy value' }; } }, { ...defaults, fantasy_probability: 0.25 }, () => 0.9);
-  assert.equal(await i.sample({}), null); assert.equal(calls, 0);
-  i.random = () => 0;
-  const r = await i.sample({}); assert.equal(calls, 1); assert.equal(r.motive, undefined); assert.equal(r.fantasy, '漂浮的虚构小岛');
-  assert.equal(engine.store.factContext().length, 0);
+test('bubbles enter storage and visible state one by one at exactly the model-selected intervals', async t => {
+  const c = setup(t, { remoteFetch: async () => completion(send({ text: '第一条\n仍是一个气泡。', after_ms: 1000 }, { text: '第二条', after_ms: 4000 }, { text: '第三条', after_ms: 15000 })) });
+  await turn(c); assert.equal(c.engine.busy, false); assert.equal(c.engine.state().waiting, true); assert.equal(assistant(c.engine).length, 0);
+  await step(c, 999); assert.equal(assistant(c.engine).length, 0);
+  await step(c, 1); assert.equal(assistant(c.engine).length, 1); assert.deepEqual(assistant(c.engine)[0].displayParts, ['第一条\n仍是一个气泡。']);
+  await step(c, 3999); assert.equal(assistant(c.engine).length, 1);
+  await step(c, 1); assert.equal(assistant(c.engine).length, 2);
+  await step(c, 15000); assert.equal(assistant(c.engine).length, 3);
+  const times = assistant(c.engine).map(m => m.created_at); assert.equal(times[1]-times[0], 4000); assert.equal(times[2]-times[1], 15000);
+  assert.equal(c.events.filter(e => e.type === 'delivered').length, 3); assert.equal(c.engine.state().waiting, false);
 });
-test('fantasy provider failures do not prevent an ordinary reply', async t => {
-  const { engine, events } = setup(t, { settings: { fantasy_probability: 1 }, remoteFetch: async (_, input) => {
-    const b = JSON.parse(input.body); if (b.response_format) throw new Error('synthetic unavailable');
-    assert.equal(JSON.parse(b.messages[1].content).imagination, null); return completion('普通回复仍然有效。');
-  } });
-  await engine.start(); await engine.command('chat.send', { content: '你好' }); await idle(engine);
-  assert.equal(events.filter(e => e.type === 'delivered').length, 1); assert.equal(engine.error, '');
+test('a rapid burst is permitted and is never replaced with a fixed count or fixed 15-second wait', async t => {
+  const c = setup(t, { remoteFetch: async () => completion(send(...Array.from({ length: 12 }, (_, i) => ({ text: `连发${i}`, after_ms: i ? 25 : 0 })))) });
+  await turn(c); await step(c, 0);
+  for (let i=1;i<12;i++) await step(c, 25);
+  assert.equal(assistant(c.engine).length, 12); assert.equal(assistant(c.engine)[11].created_at-assistant(c.engine)[0].created_at, 275);
 });
-test('reply delay has a normal-send branch and a bounded slower branch', () => {
-  assert.equal(replyDelay(defaults, () => 0.99), 0);
-  assert.equal(replyDelay(defaults, () => 0), 15000);
-  let n = 0; assert.equal(replyDelay(defaults, () => n++ ? 1 : 0), 180000);
+test('a long single model bubble is not split at newlines or character thresholds', async t => {
+  const text = '同一条长气泡。\n'.repeat(300);
+  const c = setup(t, { remoteFetch: async () => completion(send({ text, after_ms: 0 })) }); await turn(c); await settled(c.engine);
+  assert.equal(assistant(c.engine).length, 1); assert.deepEqual(assistant(c.engine)[0].displayParts, [text]);
 });
-test('delayed replies are invisible until their due time, with no minutes-long typing indicator state', async t => {
-  const g = gate(); const c = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 120000, reply_delay_max_ms: 120000 }, wait: g.wait });
-  const { engine, events } = c;
-  await engine.start(); await engine.command('chat.send', { content: '慢慢说' });
-  await waitForCondition(() => engine.state().waiting);
-  assert.equal(engine.store.messages().filter(m => m.role === 'assistant').length, 0); assert.equal(events.filter(e => e.type === 'delivered').length, 0);
-  assert.equal(engine.outbox.pending()[0].due_at, c.now() + 120000);
-  c.advance(120000); g.release(); await idle(engine);
-  assert.equal(events.filter(e => e.type === 'delivered').length, 1); assert.equal(engine.outbox.pending().length, 0);
-  assert.equal(engine.state().waiting, false);
+test('silence is a successful choice, stores internal unsaid intentions, and inserts no fake/empty assistant message', async t => {
+  let n=0;
+  const c=setup(t,{remoteFetch:async()=>n++?completion({decision:'silent',bubbles:[],resume_after_ms:600000}):completion(null,[call('unsaid_update',{operations:[{action:'upsert',key:'quiet',text:'这会儿想安静，晚点再说。'}]})])});
+  await turn(c); await settled(c.engine); assert.equal(assistant(c.engine).length,0); assert.equal(c.engine.error,'');
+  assert.equal(c.engine.store.messages()[0].status,'complete'); assert.equal(c.engine.unsaid.summary().count,1); assert.equal(c.engine.store.meta('response_quiet_until'),c.now()+600000);
+  assert.ok(!JSON.stringify(c.engine.state()).includes('这会儿想安静'));
 });
-test('a new user message cancels a waiting stale draft and its effects, then replies using current dialogue', async t => {
-  const g = gate(); let step = 0; const contexts = [];
-  const c = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 60000, reply_delay_max_ms: 60000 }, wait: g.wait, remoteFetch: async (_, input) => {
-    const b = JSON.parse(input.body); contexts.push(JSON.parse(b.messages[1].content));
-    if (step++ === 0) return completion(null, [call('unsaid_update', { operations: [{ action: 'upsert', key: 'stale', text: '不应保存的旧片段' }] })]);
-    return completion(step === 2 ? '过时的回复' : '回应新话题');
-  } });
-  const { engine, events } = c; await engine.start(); await engine.command('chat.send', { content: '旧话题' });
-  await waitForCondition(() => engine.state().waiting);
-  engine.config.reply_delay_probability = 0;
-  await engine.command('chat.send', { content: '改聊新话题' }); await idle(engine);
-  const delivered = events.filter(e => e.type === 'delivered'); assert.equal(delivered.length, 1); assert.equal(delivered[0].content, '回应新话题');
-  assert.equal(engine.unsaid.summary().count, 0); assert.equal(contexts.at(-1).dialogue.at(-1).content, '改聊新话题');
+test('model-selected quiet time suppresses autonomous triggers and new user input reopens the decision', async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion({decision:'silent',bubbles:[],resume_after_ms:600000})});
+  await turn(c); const p=installPlan(c.engine); await step(c,60000); assert.equal(c.engine.plans.get(p.id).status,'scheduled');
+  c.engine.provider.fetch=async()=>completion(send('现在想说一句。'));
+  await c.engine.command('chat.send',{content:'新话题'}); await settled(c.engine); assert.equal(c.engine.store.meta('response_quiet_until'),0);assert.equal(assistant(c.engine).length,1);
 });
-test('manual pause cancels a waiting reply without committing effects or late delivery', async t => {
-  const g = gate(); const { engine, events } = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 60000, reply_delay_max_ms: 60000 }, wait: g.wait });
-  await engine.start(); await engine.command('chat.send', { content: '先等一下' }); await waitForCondition(() => engine.state().waiting);
-  await engine.command('chat.stop'); g.release();
-  assert.equal(engine.outbox.pending().length, 0); assert.equal(events.filter(e => e.type === 'delivered').length, 0); assert.equal(engine.busy, false);
+test('a model-selected multi-minute first wait is honored without holding the generation queue',async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion(send({text:'晚点才发的第一句',after_ms:180000}))});
+  await turn(c); assert.equal(c.engine.active,null);assert.equal(c.engine.busy,false);
+  await step(c,179999);assert.equal(assistant(c.engine).length,0);await step(c,1);assert.equal(assistant(c.engine).length,1);
 });
-test('clean shutdown preserves pending delivery, restart sends once without another model call', async t => {
-  const g = gate(); const c = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 120000, reply_delay_max_ms: 120000 }, wait: g.wait });
-  const first = c.engine; await first.start(); await first.command('chat.send', { content: '等一会儿回复' }); await waitForCondition(() => first.state().waiting);
-  const id = first.outbox.pending()[0].id;
-  await first.stop({ preservePending: true }); first.close(); c.advance(120000);
-  const second = c.make({ remoteFetch: async () => { throw new Error('must not regenerate'); } });
-  await second.start(); await idle(second);
-  assert.equal(second.outbox.get(id).status, 'sent'); assert.equal(second.store.messages().filter(m => m.role === 'assistant').length, 1);
-  await second.stop({ preservePending: true }); second.close();
-  const third = c.make(); await third.start(); await idle(third); assert.equal(third.store.messages().filter(m => m.role === 'assistant').length, 1);
+test('new user input keeps already sent bubbles, cancels the unseen tail, and replans from actual history',async t=>{
+  let n=0;const seen=[];
+  const c=setup(t,{remoteFetch:async(_,input)=>{const context=JSON.parse(JSON.parse(input.body).messages[1].content);seen.push(context);return completion(n++?send('接住你的新话题'):send({text:'已经说出的半句',after_ms:0},{text:'不该补发的旧尾巴',after_ms:60000}));}});
+  await turn(c,'旧话题');await step(c,0);assert.equal(assistant(c.engine).length,1);
+  await c.engine.command('chat.send',{content:'换个话题'});await settled(c.engine);
+  assert.deepEqual(assistant(c.engine).map(m=>m.content),['已经说出的半句','接住你的新话题']);
+  assert.ok(seen.at(-1).dialogue.some(m=>m.content==='已经说出的半句'));assert.ok(!JSON.stringify(seen.at(-1).dialogue).includes('不该补发的旧尾巴'));
+  await step(c,60000);assert.equal(assistant(c.engine).length,2);
 });
-test('overdue drafts expire on restart and never become chat history', async t => {
-  const g = gate(); const c = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 60000, reply_delay_max_ms: 60000, delivery_max_age_ms: 120000 }, wait: g.wait });
-  await c.engine.start(); await c.engine.command('chat.send', { content: '稍后再说' }); await waitForCondition(() => c.engine.state().waiting);
-  await c.engine.stop({ preservePending: true }); c.engine.close(); c.advance(180000);
-  const second = c.make(); await second.start(); await idle(second);
-  assert.equal(second.outbox.pending().length, 0); assert.equal(second.store.messages().filter(m => m.role === 'assistant').length, 0);
+test('manual pause cancels future bubbles without retracting the sent prefix',async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion(send({text:'前一条',after_ms:0},{text:'取消的后一条',after_ms:60000}))});await turn(c);await step(c,0);
+  await c.engine.command('chat.stop');await step(c,60000);assert.deepEqual(assistant(c.engine).map(m=>m.content),['前一条']);assert.equal(c.engine.outbox.hasPending(),false);
 });
-test('contact plans validate dates and bounds, reuse active keys, cancel and survive reopening', t => {
-  const c = setup(t), p = c.engine.plans;
-  installPlan(c.engine); p.commit(p.plan([planOp('story', { after_minutes: 2 })]));
-  assert.equal(p.summary().active_count, 1); assert.equal(p.read().items[0].due_at, c.now() + 120000);
-  for (const op of [planOp('x', { after_minutes: 0 }), planOp('x', { after_minutes: 10081 }), planOp('x', { after_minutes: undefined, due_at: '2026-10-31T12:00:00' }), planOp('x', { expire_after_minutes: 0 })]) assert.throws(() => p.plan([op]));
-  const second = new AgentStore(c.dir); assert.equal(new ContactPlans(second, defaults, c.now).summary().active_count, 1); second.close();
-  p.commit(p.plan([{ action: 'cancel', key: 'story' }])); assert.equal(p.summary().active_count, 0);
+test('restart resumes only unsent bubbles, once each, and does not generate again',async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion(send({text:'重启前',after_ms:0},{text:'重启后',after_ms:60000},{text:'再隔一会儿',after_ms:7000}))});await turn(c);await step(c,0);
+  const id=c.engine.outbox.pending()[0].id;await c.engine.stop({preservePending:true});c.engine.close();c.advance(60000);
+  const second=c.make({remoteFetch:async()=>{throw Error('must not regenerate');}});await second.start();await second.tick();await drained(second);
+  assert.deepEqual(assistant(second).map(m=>m.content),['重启前','重启后']);c.advance(7000);await second.tick();await drained(second);
+  assert.equal(assistant(second).length,3);assert.equal(second.outbox.get(id).status,'sent');
+  await second.stop({preservePending:true});second.close();const third=c.make();await third.start();await settled(third);assert.equal(assistant(third).length,3);
 });
-test('successful dialogue atomically saves a plan and an unsaid fragment', async t => {
-  let step = 0;
-  const { engine } = setup(t, { remoteFetch: async () => step++ ? completion('到时有空再聊。') : completion(null, [call('contact_plan_update', { operations: [planOp()] }), call('unsaid_update', { operations: [{ action: 'upsert', key: 'wish', text: '留一个小故事等下次再讲' }] })]) });
-  await engine.start(); await engine.command('chat.send', { content: '晚点见' }); await idle(engine);
-  assert.equal(engine.plans.summary().active_count, 1); assert.equal(engine.unsaid.summary().count, 1);
+test('late restart preserves the model-selected inter-bubble gap instead of dumping an overdue burst',async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion(send({text:'一',after_ms:1000},{text:'二',after_ms:5000},{text:'三',after_ms:7000}))});await turn(c);
+  await c.engine.stop({preservePending:true});c.engine.close();c.advance(60000);const second=c.make();await second.start();await second.tick();await drained(second);
+  assert.equal(assistant(second).length,1);await second.tick();await drained(second);assert.equal(assistant(second).length,1);
+  c.advance(5000);await second.tick();await drained(second);assert.equal(assistant(second).length,2);
 });
-test('a due plan generates with fresh dialogue and sends exactly once, independently of random proactive chance', async t => {
-  let context;
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 }, remoteFetch: async (_, input) => { context = JSON.parse(JSON.parse(input.body).messages[1].content); return completion('现在有个小故事。'); } });
-  installPlan(c.engine); c.engine.store.addMessage('user', '这是最近的新消息', c.now()); c.advance(60000);
-  await c.engine.start(); await c.engine.tick(); await idle(c.engine);
-  assert.equal(context.trigger, 'planned'); assert.equal(context.dialogue.at(-1).content, '这是最近的新消息'); assert.ok(context.scheduled_contact.intent);
-  assert.equal(c.events.filter(e => e.type === 'delivered').length, 1); assert.equal(c.engine.plans.summary().active_count, 0);
-  await c.engine.tick(); await idle(c.engine); assert.equal(c.events.filter(e => e.type === 'delivered').length, 1);
+test('a crash after a bubble receipt commits cannot replay it after reopening',async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion(send({text:'持久化的第一条',after_ms:0},{text:'下一条',after_ms:1000}))});await turn(c);await step(c,0);c.engine.close();
+  const second=c.make();await second.start();c.advance(1000);await second.tick();await drained(second);assert.equal(assistant(second).length,2);
+  const rows=second.outbox.bubbles(second.store.db.prepare('SELECT id FROM delivery_outbox').get().id);assert.equal(new Set(rows.map(r=>r.message_id)).size,2);
 });
-test('focus, lock/unavailability, typing and manual pause defer plans, then availability resumes them', async t => {
-  let presence = { available: true, focus: true };
-  const c = setup(t, { presence: () => presence, settings: { contact_plan_min_gap_ms: 0 } });
-  installPlan(c.engine); c.advance(60000); await c.engine.start();
-  for (const p of [{ available: true, focus: true }, { available: false, focus: false }]) { presence = p; await c.engine.tick(); await idle(c.engine); assert.equal(c.events.filter(e => e.type === 'delivered').length, 0); }
-  presence = { available: true, focus: false }; c.engine.typingUntil = c.now() + 1000; await c.engine.tick(); await idle(c.engine);
-  c.advance(1000); c.engine.manualPause = true; await c.engine.tick(); assert.equal(c.events.filter(e => e.type === 'delivered').length, 0);
-  c.engine.manualPause = false; await c.engine.tick(); await idle(c.engine); assert.equal(c.events.filter(e => e.type === 'delivered').length, 1);
+test('expired pending replies cancel, retaining already sent messages only',async t=>{
+  const c=setup(t,{settings:{delivery_max_age_ms:10,delivery_send_grace_ms:10},remoteFetch:async()=>completion(send({text:'只保存这一句',after_ms:0},{text:'已经过期的尾巴',after_ms:1000}))});await turn(c);await step(c,0);
+  await c.engine.stop({preservePending:true});c.engine.close();c.advance(2000);const second=c.make();await second.start();await second.tick();await drained(second);
+  assert.deepEqual(assistant(second).map(m=>m.content),['只保存这一句']);assert.equal(second.outbox.hasPending(),false);
 });
-test('due plan can silently skip or reschedule without a final model message, and may retain an unsaid fragment', async t => {
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 }, remoteFetch: async () => completion(null, [
-    call('unsaid_update', { operations: [{ action: 'upsert', key: 'later', text: '这个故事换个时候讲' }] }),
-    call('contact_plan_decide', { action: 'reschedule', after_minutes: 10 }),
-  ]) });
-  const p = installPlan(c.engine); c.advance(60000); await c.engine.start(); await c.engine.tick(); await idle(c.engine);
-  assert.equal(c.events.filter(e => e.type === 'delivered').length, 0); assert.equal(c.engine.plans.get(p.id).due_at, c.now() + 600000); assert.equal(c.engine.unsaid.summary().count, 1);
-  c.engine.provider.fetch = async () => completion(null, [call('contact_plan_decide', { action: 'skip' })]);
-  c.advance(600000); await c.engine.tick(); await idle(c.engine);
-  assert.equal(c.engine.plans.get(p.id).status, 'cancelled'); assert.equal(c.events.filter(e => e.type === 'delivered').length, 0);
+test('legacy whole-reply outbox entries cancel on upgrade without changing historical messages',t=>{
+  const c=setup(t);c.engine.store.addMessage('assistant','旧历史保持原样',c.now());const u=c.engine.store.addMessage('user','旧输入',c.now(),{status:'pending'});
+  c.engine.store.db.prepare("INSERT INTO delivery_outbox(id,source_message_id,source_seq,kind,content,payload_json,due_at,expires_at,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run('legacy',u.id,u.seq,'user','旧式整段等待','{}',c.now()+1000,c.now()+60000,'pending',c.now());c.engine.close();
+  const second=c.make();assert.equal(second.outbox.get('legacy').status,'cancelled');assert.equal(assistant(second)[0].content,'旧历史保持原样');assert.equal(second.store.messages().find(m=>m.id===u.id).status,'interrupted');
 });
-test('plan failures retry after cooldown, without duplicates or consuming the plan', async t => {
-  let broken = true;
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 }, remoteFetch: async () => broken ? completion('分析步骤：坏正文') : completion('重试后的有效消息') });
-  const p = installPlan(c.engine); c.advance(60000); await c.engine.start(); await c.engine.tick(); await idle(c.engine);
-  assert.equal(c.engine.plans.get(p.id).status, 'scheduled'); assert.equal(c.engine.plans.due(), null);
-  c.advance(300000); broken = false; await c.engine.tick(); await idle(c.engine); assert.equal(c.engine.plans.get(p.id).status, 'completed');
-  assert.equal(c.events.filter(e => e.type === 'delivered').length, 1);
+test('unsaid uses stable keys and remains separate from facts and public UI state',t=>{
+  const c=setup(t),u=c.engine.unsaid;u.commit(u.plan([{action:'upsert',key:'x',text:'没说出口的内容'}]));u.commit(u.plan([{action:'upsert',key:'x',text:'改过的内容'}]));
+  assert.equal(u.summary().count,1);assert.equal(u.read().items[0].text,'改过的内容');assert.equal(c.engine.store.factContext().length,0);assert.ok(!JSON.stringify(c.engine.state()).includes('改过的内容'));
+  const second=new AgentStore(c.dir);assert.equal(new Unsaid(second).summary().count,1);second.close();u.commit(u.plan([{action:'remove',key:'x'}]));assert.equal(u.summary().count,0);
 });
-test('missed plans expire after their grace window rather than bursting after a long offline period', async t => {
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 } }); const p = installPlan(c.engine, planOp('old', { expire_after_minutes: 2 }));
-  await c.engine.stop({ preservePending: true }); c.engine.close(); c.advance(4 * 60000);
-  const second = c.make(); await second.start(); assert.equal(second.plans.due(), null); assert.equal(second.plans.get(p.id).status, 'expired');
-  assert.equal(c.events.filter(e => e.type === 'delivered').length, 0);
+test('failed/invalid response plans cannot commit tool edits or partial outgoing bubbles',async t=>{
+  let n=0;const c=setup(t,{remoteFetch:async()=>n++?completion({decision:'send',bubbles:[{text:'bad',after_ms:-1}]}):completion(null,[call('unsaid_update',{operations:[{action:'upsert',key:'invalid',text:'不应保存'}]}),call('contact_plan_update',{operations:[planOp()]})])});
+  await turn(c);assert.equal(c.engine.unsaid.summary().count,0);assert.equal(c.engine.plans.summary().active_count,0);assert.equal(c.engine.outbox.hasPending(),false);assert.equal(assistant(c.engine).length,0);
 });
-test('crashed running plans recover and pending drafts and plan intent are included only in full local exports', t => {
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 } }); const p = installPlan(c.engine); c.advance(60000); c.engine.plans.claim(p.id); c.engine.close();
-  const second = c.make(); assert.equal(second.plans.get(p.id).status, 'scheduled');
-  const data = second.store.exportData(); assert.equal(data.schema, 2); assert.ok(Array.isArray(data.delivery_outbox)); assert.ok(data.metadata.find(m => m.key === 'contact_plans'));
-  assert.ok(!JSON.stringify(second.state()).includes(p.intent));
+test('valid intentions persist even if the model schedules speech later, without pretending it was sent',async t=>{
+  let n=0;const c=setup(t,{remoteFetch:async()=>n++?completion(send({text:'之后才说',after_ms:60000})):completion(null,[call('unsaid_update',{operations:[{action:'upsert',key:'later',text:'先记下，尚未说出'}]})])});
+  await turn(c);assert.equal(c.engine.unsaid.summary().count,1);assert.equal(assistant(c.engine).length,0);await c.engine.command('chat.stop');assert.equal(c.engine.unsaid.summary().count,1);
+});
+test('fantasy stays probabilistic optional context and never requires a temporary motive',async t=>{
+  const c=setup(t);let calls=0;const i=new Imagination(c.engine.store,{object:async()=>{calls++;return{fantasy:'虚构的漂浮小岛'};}},{...defaults,fantasy_probability:.25},()=>.9);
+  assert.equal(await i.sample({}),null);assert.equal(calls,0);i.random=()=>0;assert.equal((await i.sample({})).motive,undefined);assert.equal(c.engine.store.factContext().length,0);
+});
+test('contact plans validate times, reuse keys, cancel and survive reopening',t=>{
+  const c=setup(t),p=c.engine.plans;installPlan(c.engine);p.commit(p.plan([planOp('story',{after_minutes:2})]));assert.equal(p.summary().active_count,1);
+  for(const op of [planOp('x',{after_minutes:0}),planOp('x',{after_minutes:10081}),planOp('x',{after_minutes:undefined,due_at:'2026-10-31T12:00:00'})])assert.throws(()=>p.plan([op]));
+  const second=new AgentStore(c.dir);assert.equal(new ContactPlans(second,defaults,c.now).summary().active_count,1);second.close();p.commit(p.plan([{action:'cancel',key:'story'}]));assert.equal(p.summary().active_count,0);
+});
+test('a due contact can send a model-chosen timed sequence using fresh dialogue',async t=>{
+  let context;const c=setup(t,{settings:{contact_plan_min_gap_ms:0},remoteFetch:async(_,input)=>{context=JSON.parse(JSON.parse(input.body).messages[1].content);return completion(send({text:'现在第一条',after_ms:0},{text:'接着第二条',after_ms:2000}));}});
+  const p=installPlan(c.engine);c.engine.store.addMessage('user','最新消息',c.now());c.advance(60000);await c.engine.start();await c.engine.tick();await drained(c.engine);await step(c,0);
+  assert.equal(context.trigger,'planned');assert.equal(context.dialogue.at(-1).content,'最新消息');assert.equal(assistant(c.engine).length,1);assert.equal(c.engine.plans.get(p.id).status,'running');
+  await step(c,2000);assert.equal(assistant(c.engine).length,2);assert.equal(c.engine.plans.get(p.id).status,'completed');assert.equal(c.events.filter(e=>e.type==='delivered').length,2);
+});
+test('autonomous bursts update their own baseline instead of canceling after the first bubble',async t=>{
+  const c=setup(t,{remoteFetch:async()=>completion(send({text:'主动一',after_ms:0},{text:'主动二',after_ms:200},{text:'主动三',after_ms:300}))});
+  c.engine.store.addMessage('user','很久以前',c.now()-4*3600000);await c.engine.start();await c.engine.tick();await drained(c.engine);await step(c,0);await step(c,200);await step(c,300);assert.equal(assistant(c.engine).length,3);
+});
+test('focus, lock, typing and manual pause defer scheduled contacts',async t=>{
+  let presence={available:false,focus:false};const c=setup(t,{presence:()=>presence,settings:{contact_plan_min_gap_ms:0}});installPlan(c.engine);c.advance(60000);await c.engine.start();await c.engine.tick();await drained(c.engine);assert.equal(assistant(c.engine).length,0);
+  presence={available:true,focus:true};await c.engine.tick();await drained(c.engine);assert.equal(assistant(c.engine).length,0);
+  presence.focus=false;c.engine.typingUntil=c.now()+1000;await c.engine.tick();await drained(c.engine);assert.equal(assistant(c.engine).length,0);
+  c.advance(1000);c.engine.manualPause=true;await c.engine.tick();assert.equal(assistant(c.engine).length,0);c.engine.manualPause=false;await c.engine.tick();await settled(c.engine);assert.equal(assistant(c.engine).length,1);
+});
+test('lock or typing between autonomous bubbles cancels the unseen tail while keeping the sent prefix',async t=>{
+  let p={available:true,focus:false};const c=setup(t,{presence:()=>p,settings:{contact_plan_min_gap_ms:0},remoteFetch:async()=>completion(send({text:'主动前缀',after_ms:0},{text:'不应在锁屏后送达',after_ms:1000}))});
+  installPlan(c.engine);c.advance(60000);await c.engine.start();await c.engine.tick();await drained(c.engine);await step(c,0);p={available:false,focus:false};await step(c,1000);assert.equal(assistant(c.engine).length,1);assert.equal(c.engine.outbox.hasPending(),false);
+});
+test('a scheduled contact can choose silence, reschedule or skip without fake visible messages',async t=>{
+  const c=setup(t,{settings:{contact_plan_min_gap_ms:0},remoteFetch:async()=>completion(null,[call('contact_plan_decide',{action:'reschedule',after_minutes:10})])});const p=installPlan(c.engine);c.advance(60000);await c.engine.start();await c.engine.tick();await drained(c.engine);assert.equal(assistant(c.engine).length,0);assert.equal(c.engine.plans.get(p.id).due_at,c.now()+600000);
+  c.engine.provider.fetch=async()=>completion({decision:'silent',bubbles:[]});c.advance(600000);await c.engine.tick();await settled(c.engine);assert.equal(c.engine.plans.get(p.id).status,'completed');assert.equal(assistant(c.engine).length,0);
+});
+test('plan failures retry after cooldown and expire rather than repeatedly sending',async t=>{
+  let broken=true;const c=setup(t,{settings:{contact_plan_min_gap_ms:0},remoteFetch:async()=>broken?completion({decision:'bad',bubbles:[]}):completion(send('重试后的一条'))});const p=installPlan(c.engine);c.advance(60000);await c.engine.start();await c.engine.tick();await drained(c.engine);assert.equal(c.engine.plans.get(p.id).status,'scheduled');assert.equal(c.engine.plans.due(),null);
+  broken=false;c.advance(300000);await c.engine.tick();await settled(c.engine);assert.equal(c.engine.plans.get(p.id).status,'completed');assert.equal(assistant(c.engine).length,1);
+});
+test('silent decisions never mark an unspoken life story as shared',async t=>{
+  let n=0;const c=setup(t,{remoteFetch:async()=>n++?completion({decision:'silent',bubbles:[]}):completion(null,[call('life_mark_shared',{ids:['life']})])});c.engine.store.db.prepare("INSERT INTO life_activities(id,title,description,started_at,due_at,finished_at,status,record) VALUES(?,?,?,?,?,?,?,?)").run('life','合成生活','合成活动',c.now()-1000,c.now(),c.now(),'complete','合成故事');
+  await turn(c);assert.equal(c.engine.store.db.prepare('SELECT shared_at FROM life_activities WHERE id=?').get('life').shared_at,null);
+});
+test('life sharing is not committed by a partly delivered burst that is later interrupted',async t=>{
+  let n=0;const c=setup(t,{remoteFetch:async()=>n++?completion(send({text:'一个开头',after_ms:0},{text:'完整故事还没发',after_ms:60000})):completion(null,[call('life_mark_shared',{ids:['life']})])});c.engine.store.db.prepare("INSERT INTO life_activities(id,title,description,started_at,due_at,finished_at,status,record) VALUES(?,?,?,?,?,?,?,?)").run('life','合成生活','合成活动',c.now()-1000,c.now(),c.now(),'complete','合成故事');
+  await turn(c);await step(c,0);await c.engine.command('chat.stop');assert.equal(c.engine.store.db.prepare('SELECT shared_at FROM life_activities WHERE id=?').get('life').shared_at,null);
+});
+test('schema upgrade preserves historical data and includes private bubble receipts only in full local export',t=>{
+  const c=setup(t);c.engine.store.addMessage('user','合成旧记录',c.now());const before=c.engine.store.messages();c.engine.store.db.exec('DROP TABLE delivery_bubbles');c.engine.close();const second=c.make();assert.deepEqual(second.store.messages(),before);assert.equal(second.store.exportData().schema,3);assert.ok(Array.isArray(second.store.exportData().delivery_bubbles));
 });
 
-test('new input arriving during generation does not wait behind an obsolete delayed reply', async t => {
-  let release; let generation = 0, sleeps = 0;
-  const blocked = new Promise(r => { release = r; });
-  const c = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 60000, reply_delay_max_ms: 60000 },
-    wait: async ms => { sleeps++; c.advance(ms); }, remoteFetch: async () => { if (!generation++) await blocked; return completion('回复' + generation); } });
-  await c.engine.start(); await c.engine.command('chat.send', { content: '第一件事' }); await waitForCondition(() => c.engine.active);
-  await c.engine.command('chat.send', { content: '改聊第二件事' }); release(); await idle(c.engine);
-  assert.equal(sleeps, 1); assert.equal(c.events.filter(e => e.type === 'delivered').length, 1);
-});
-test('due plans are still suppressed when a new user message arrives during their generation', async t => {
-  let release;
-  const blocked = new Promise(r => { release = r; }); let n = 0;
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 }, remoteFetch: async () => { if (!n++) await blocked; return completion(n === 1 ? '不该发出的计划消息' : '回应新消息'); } });
-  const p = installPlan(c.engine); c.advance(60000); await c.engine.start(); await c.engine.tick(); await waitForCondition(() => c.engine.active?.kind === 'planned');
-  await c.engine.command('chat.send', { content: '我现在来聊天' }); release(); await idle(c.engine);
-  assert.equal(c.events.filter(e => e.type === 'delivered' && e.autonomous).length, 0); assert.equal(c.engine.plans.get(p.id).status, 'scheduled');
-});
-test('an interrupted queued plan is released even if no generation has started', async t => {
-  const c = setup(t); const p = installPlan(c.engine); c.advance(60000); await c.engine.start();
-  const claimed = c.engine.plans.claim(p.id);
-  // Hold the drain until chat.send has replaced the queued autonomous task.
-  c.engine.draining = Promise.resolve(); c.engine.enqueue({ kind: 'planned', plan: claimed, baseline: 0 });
-  await c.engine.command('chat.send', { content: '先和我聊' });
-  c.engine.draining = null; c.engine.enqueueDrain(); await idle(c.engine);
-  assert.equal(c.engine.plans.get(p.id).status, 'scheduled');
-});
-test('upgrading a pre-outbox database preserves synthetic messages, facts and relationship prose', t => {
-  const c = setup(t), s = c.engine.store;
-  s.addMessage('user', '合成的旧消息', c.now()); s.commitFacts([{ key: 'synthetic', text: '合成事实', evidence: [] }], c.now());
-  const before = { messages: s.messages(), facts: s.factContext(), prose: s.relationship() };
-  s.db.exec('DROP TABLE delivery_outbox'); c.engine.close();
-  const second = c.make();
-  assert.deepEqual(second.store.messages(), before.messages); assert.deepEqual(second.store.factContext(), before.facts); assert.deepEqual(second.store.relationship(), before.prose);
-  assert.equal(second.outbox.pending().length, 0);
-});
-test('delayed tool effects commit once after restart, never before delivery', async t => {
-  const g = gate(); let step = 0;
-  const c = setup(t, { settings: { reply_delay_probability: 1, reply_delay_min_ms: 60000, reply_delay_max_ms: 60000 }, wait: g.wait,
-    remoteFetch: async () => step++ ? completion('这次发送后才保存') : completion(null, [call('unsaid_update', { operations: [{ action: 'upsert', key: 'persisted', text: '成功发送后保留的待说片段' }] })]) });
-  await c.engine.start(); await c.engine.command('chat.send', { content: '稍后' }); await waitForCondition(() => c.engine.state().waiting);
-  assert.equal(c.engine.unsaid.summary().count, 0);
-  await c.engine.stop({ preservePending: true }); c.engine.close(); c.advance(60000);
-  const second = c.make(); await second.start(); await idle(second);
-  assert.equal(second.unsaid.summary().count, 1); assert.equal(second.unsaid.state().revision, 1);
-  await second.stop({ preservePending: true }); second.close(); const third = c.make(); await third.start(); await idle(third); assert.equal(third.unsaid.state().revision, 1);
-});
 
-test('silently skipped contact cannot mark an unspoken life story shared or commit a pending life activity', async t => {
-  const c = setup(t, { settings: { contact_plan_min_gap_ms: 0 }, remoteFetch: async () => completion(null, [
-    call('life_mark_shared', { ids: ['synthetic-life'] }),
-    call('life_plan', { title: '不应开始', description: '这是被取消消息里尚未提交的活动', duration_minutes: 10 }),
-    call('contact_plan_decide', { action: 'skip' }),
-  ]) });
-  c.engine.store.db.prepare("INSERT INTO life_activities(id,title,description,started_at,due_at,finished_at,status,record) VALUES(?,?,?,?,?,?,?,?)")
-    .run('synthetic-life', '合成小故事', '合成活动', c.now()-60000, c.now(), c.now(), 'complete', '合成生活记录');
-  installPlan(c.engine); c.advance(60000); await c.engine.start(); await c.engine.tick(); await idle(c.engine);
-  assert.equal(c.engine.life.current(), null);
-  assert.equal(c.engine.store.db.prepare('SELECT shared_at FROM life_activities WHERE id=?').get('synthetic-life').shared_at, null);
-  assert.equal(c.events.filter(e=>e.type==='delivered').length, 0);
+test('choosing quiet does not suspend the companion own-life or internal maintenance', async t => {
+  const c = setup(t); c.engine.store.setMeta('response_quiet_until', c.now()+600000);
+  let maintained=0; c.engine.memory.due=()=>true; c.engine.news.due=()=>false;
+  c.engine.maintain=async()=>{maintained++;}; await c.engine.start(); await c.engine.tick(); await drained(c.engine);
+  assert.equal(maintained,1); assert.equal(assistant(c.engine).length,0);
 });

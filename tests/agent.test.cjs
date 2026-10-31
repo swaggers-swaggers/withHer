@@ -22,7 +22,7 @@ const { waitForCondition } = require('./helpers.cjs');
 const folder = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dafeyu-test-'));
 const snapshot = () => ({ todos: [], notes: [], timer: { status: 'idle' }, learning: {} });
 const vault = { get: () => 'fake-local-test-key', status: () => ({ configured: true, storage: 'session', error: '' }), save() {}, clear() {} };
-const completion = (content = '嗯，今天我陪着你。', extra = {}, finish_reason = 'stop') => new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content, reasoning_content: 'PRIVATE REASONING', ...extra }, finish_reason }] }), { headers: { 'Content-Type': 'application/json' } });
+const completion = (content = '嗯，今天我陪着你。', extra = {}, finish_reason = 'stop') => new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: typeof content === 'string' && !/^\s*[{[]/.test(content) && !extra.tool_calls ? JSON.stringify({ decision: 'send', bubbles: [{ text: content, after_ms: 0 }] }) : content, reasoning_content: 'PRIVATE REASONING', ...extra }, finish_reason }] }), { headers: { 'Content-Type': 'application/json' } });
 const call = (name, args, id = name) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 const narrative = '我开始慢慢懂得他对安静的坚持。那不是疏远，只是他希望自己的节奏被认真对待。我愿意在旁边轻轻说话，偶尔逗他一下，也留一段不用回答的空白。';
 function setup(t, options = {}) {
@@ -32,7 +32,7 @@ function setup(t, options = {}) {
   t.after(async () => { await engine.stop(); engine.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { engine, dir, events, wire };
 }
-const idle = engine => waitForCondition(() => !engine.draining && !engine.active && !engine.queue.length, 5000);
+const idle = engine => waitForCondition(() => !engine.draining && !engine.active && !engine.queue.length && !engine.outbox.hasPending(), 5000);
 
 test('legacy migration is transactional, idempotent and preserves exact message IDs, times and quotes', () => {
   const dir = folder(), old = new DatabaseSync(path.join(dir, 'maibot-view.sqlite'));
@@ -233,12 +233,12 @@ test('significant relationship tool updates independent prose and does not write
   assert.equal(engine.store.relationship().mode, 'significant'); assert.equal(engine.store.relationship().narrative, narrative);
   assert.equal(engine.store.factContext().length, 0); assert.deepEqual(engine.store.meta('custom_motives', []), []);
 });
-test('multiple user sends are serialized, attributed and do not leak future messages into an earlier reply', async t => {
-  const contexts = [];
-  const { engine } = setup(t, { remoteFetch: async (_, input) => { contexts.push(JSON.parse(JSON.parse(input.body).messages[1].content)); await new Promise(r => setTimeout(r, 20)); return completion('收到啦。'); } });
-  await engine.start(); await engine.command('chat.send', { content: '第一条' }); await engine.command('chat.send', { content: '第二条' }); await idle(engine);
+test('new input supersedes unfinished generation without losing source messages or inventing an earlier reply', async t => {
+  const contexts = []; let releaseFirst; const first = new Promise(resolve => { releaseFirst = resolve; });
+  const { engine } = setup(t, { remoteFetch: async (_, input) => { contexts.push(JSON.parse(JSON.parse(input.body).messages[1].content)); if (contexts.length === 1) await first; return completion('收到啦。'); } });
+  await engine.start(); await engine.command('chat.send', { content: '第一条' }); await waitForCondition(() => contexts.length === 1); await engine.command('chat.send', { content: '第二条' }); releaseFirst(); await idle(engine);
   assert.equal(contexts.length, 2); assert.equal(contexts[0].dialogue.at(-1).content, '第一条'); assert.ok(!JSON.stringify(contexts[0]).includes('第二条'));
-  assert.equal(contexts[1].dialogue.at(-1).content, '第二条'); assert.equal(contexts[1].dialogue[1].content, '收到啦。'); assert.equal(engine.store.messages().filter(m => m.role === 'assistant').length, 2);
+  assert.equal(contexts[1].dialogue.at(-1).content, '第二条'); assert.deepEqual(contexts[1].dialogue.map(m => m.content), ['第一条', '第二条']); assert.equal(engine.store.messages().filter(m => m.role === 'assistant').length, 1);
 });
 test('stop cancels an in-flight reply, marks the pending message and prevents late delivery', async t => {
   let started = false;

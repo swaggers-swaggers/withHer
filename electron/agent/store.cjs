@@ -46,6 +46,9 @@ class AgentStore {
         baseline_seq INTEGER,kind TEXT NOT NULL,plan_id TEXT,content TEXT NOT NULL,payload_json TEXT NOT NULL,
         due_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,sent_at INTEGER);
       CREATE INDEX IF NOT EXISTS delivery_pending ON delivery_outbox(status,due_at);
+      CREATE TABLE IF NOT EXISTS delivery_bubbles(outbox_id TEXT NOT NULL,position INTEGER NOT NULL,content TEXT NOT NULL,
+        kind TEXT NOT NULL,gap_ms INTEGER NOT NULL,due_at INTEGER NOT NULL,status TEXT NOT NULL,message_id TEXT UNIQUE,sent_at INTEGER,
+        PRIMARY KEY(outbox_id,position));
       CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);`);
     if (!this.db.prepare('PRAGMA table_info(messages)').all().some(c => c.name === 'reply_to_seq')) this.db.exec('ALTER TABLE messages ADD COLUMN reply_to_seq INTEGER');
     this.db.prepare("UPDATE messages SET status='interrupted' WHERE status='pending' AND id NOT IN (SELECT source_message_id FROM delivery_outbox WHERE status='pending' AND source_message_id IS NOT NULL)").run();
@@ -175,8 +178,8 @@ class AgentStore {
     throw new Error('查找范围无效');
   }
   exportData() {
-    const tables = ['messages', 'facts', 'study_records', 'relationship_versions', 'batches', 'news', 'metadata', 'life_activities', 'delivery_outbox'];
-    return { engine: 'Dafeyu', schema: 2, ...Object.fromEntries(tables.map(t => [t, this.db.prepare(`SELECT * FROM ${t}`).all()])) };
+    const tables = ['messages', 'facts', 'study_records', 'relationship_versions', 'batches', 'news', 'metadata', 'life_activities', 'delivery_outbox', 'delivery_bubbles'];
+    return { engine: 'Dafeyu', schema: 3, ...Object.fromEntries(tables.map(t => [t, this.db.prepare(`SELECT * FROM ${t}`).all()])) };
   }
   close() { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this.db.close(); }
 }

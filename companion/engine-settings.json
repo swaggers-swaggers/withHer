@@ -1,7 +1,9 @@
 {
   "schema": 1,
   "model": "deepseek-flash",
-  "thinking": { "type": "enabled" },
+  "thinking": {
+    "type": "enabled"
+  },
   "reasoning_effort": "high",
   "request_timeout_ms": 150000,
   "reply_max_tokens": 8192,
@@ -22,15 +24,18 @@
   "news_refresh_ms": 14400000,
   "news_retry_ms": 900000,
   "news_max_age_ms": 86400000,
-  "news_topics": ["科技 人工智能 科学 生活 趣闻"],
+  "news_topics": [
+    "科技 人工智能 科学 生活 趣闻"
+  ],
   "life_enabled": true,
   "life_pause_ms": 2700000,
   "life_retry_ms": 900000,
   "fantasy_probability": 0.25,
-  "reply_delay_probability": 0.75,
-  "reply_delay_min_ms": 15000,
-  "reply_delay_max_ms": 180000,
   "delivery_max_age_ms": 21600000,
   "contact_plan_retry_ms": 300000,
-  "contact_plan_min_gap_ms": 120000
+  "contact_plan_min_gap_ms": 120000,
+  "reply_max_bubbles": 64,
+  "reply_max_schedule_ms": 86400000,
+  "reply_max_characters": 32000,
+  "delivery_send_grace_ms": 10800000
 }

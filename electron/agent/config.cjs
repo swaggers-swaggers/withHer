@@ -30,13 +30,16 @@ function loadConfig(dataDir) {
   }
   const config = { ...defaults, ...saved, thinking: { type: 'enabled' } };
   config.timezone ||= Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  for (const key of ['fantasy_probability', 'reply_delay_probability']) {
+  for (const key of ['fantasy_probability']) {
     if (!Number.isFinite(config[key]) || config[key] < 0 || config[key] > 1) config[key] = defaults[key];
   }
-  for (const key of ['reply_delay_min_ms', 'reply_delay_max_ms', 'delivery_max_age_ms', 'contact_plan_retry_ms', 'contact_plan_min_gap_ms']) {
+  for (const key of ['reply_max_schedule_ms', 'delivery_send_grace_ms', 'delivery_max_age_ms', 'contact_plan_retry_ms', 'contact_plan_min_gap_ms']) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 0 || config[key] > 86400000) config[key] = defaults[key];
   }
-  config.reply_delay_max_ms = Math.max(config.reply_delay_min_ms, config.reply_delay_max_ms);
+  for (const key of ['reply_max_bubbles', 'reply_max_characters']) {
+    if (!Number.isSafeInteger(config[key]) || config[key] < 1 || config[key] > (key === 'reply_max_bubbles' ? 128 : 64000)) config[key] = defaults[key];
+  }
+  for (const key of ['reply_delay_probability', 'reply_delay_min_ms', 'reply_delay_max_ms']) delete config[key];
   config.chat_max_messages = 200;
   delete config.chat_input_token_budget;
   config.prompt_directory ||= path.join(dataDir, 'companion-prompts');

@@ -47,3 +47,13 @@ test('every newline including CRLF, bare CR and Unicode separators starts a new 
 test('both user and assistant messages use identical newline boundaries and keep code indentation',()=>{
  for(const role of ['user','assistant']){const m=presentMessage({role,content:'开头\n```python\n  x = 1\n  print(x)\n```\n结尾'});assert.deepEqual(m.displayParts,['开头','  x = 1','  print(x)','结尾']);assert.deepEqual(m.displayKinds,['text','code','code','text']);}
 });
+
+
+test('model-authored bubble boundaries preserve embedded newlines and punctuation as one bubble',()=>{
+ const raw='第一句。\n第二段！\n'; const m=presentMessage({content:raw,segments_json:JSON.stringify([{type:'model_bubble',data:{kind:'text'}}])});
+ assert.deepEqual(m.displayParts,[raw]); assert.deepEqual(m.displayKinds,['text']);assert.equal(m.content,raw);
+});
+test('model-authored code bubble preserves indentation without line splitting',()=>{
+ const raw='  x = 1\n  print(x)';const m=presentMessage({content:raw,segments_json:JSON.stringify([{type:'model_bubble',data:{kind:'code'}}])});
+ assert.deepEqual(m.displayParts,[raw]);assert.deepEqual(m.displayKinds,['code']);
+});
