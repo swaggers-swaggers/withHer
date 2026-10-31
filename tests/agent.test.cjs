@@ -268,7 +268,8 @@ test('invalid final output is never stored or delivered and the user can send ag
 test('facts, prose, presets, cursors, news and chat are all included in local export and survive restart', t => {
   const { engine, dir } = setup(t); engine.store.setMeta('custom_motives', [{ id: 'tea', text: '茶', weight: 1 }]); engine.store.setMeta('memory_cursor', 12);
   const exported = engine.store.exportData(); for (const name of ['facts', 'relationship_versions', 'metadata', 'news', 'messages', 'batches']) assert.ok(Array.isArray(exported[name]));
-  assert.equal(fs.statSync(path.join(dir, 'dafeyu.sqlite')).mode & 0o777, 0o600);
+  // POSIX permission bits do not describe Windows ACLs. Persistence is tested on both.
+  if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(dir, 'dafeyu.sqlite')).mode & 0o777, 0o600);
   const reopened = new AgentStore(dir);
   assert.equal(reopened.meta('memory_cursor'), 12); assert.equal(reopened.meta('custom_motives')[0].id, 'tea');
   assert.equal(reopened.relationship().narrative, engine.store.relationship().narrative); reopened.close();
