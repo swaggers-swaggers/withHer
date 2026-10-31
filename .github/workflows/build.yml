@@ -1,0 +1,45 @@
+name: Build and check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check:privacy
+      - run: npm run test:portable
+      - run: npm run build
+      - name: Build Windows installer and portable executable
+        if: runner.os == 'Windows'
+        run: node scripts/package-app.cjs win
+      - name: Check packaged Windows startup with an empty profile
+        if: runner.os == 'Windows'
+        run: npm run test:smoke
+      - name: Upload Windows packages
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: StudyDesk-Windows-x64
+          path: release/*.exe
+          if-no-files-found: error
+          retention-days: 14

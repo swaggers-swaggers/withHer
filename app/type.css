@@ -1,0 +1,2 @@
+/* 优先使用本机字体，不请求远程字体，离线也能正常显示。 */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 100 900; src: local('Inter Variable'), local('Inter'); font-display: swap; }

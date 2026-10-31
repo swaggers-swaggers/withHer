@@ -1,0 +1,31 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
+const root = path.resolve(__dirname, '..');
+const version = require('../package.json').version;
+const release = path.join(root, 'release');
+const unpacked = path.join(release, 'linux-unpacked');
+if (!fs.existsSync(path.join(unpacked, 'studydesk'))) throw new Error('请先运行 npm run pack');
+const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'studydesk-deb-'));
+const target = path.join(stage, 'opt', 'studydesk');
+fs.mkdirSync(path.dirname(target), { recursive: true });
+fs.cpSync(unpacked, target, { recursive: true });
+// 本机免安装运行可链接系统组件；deb 必须带自己的真实文件，避免依赖 Chrome。
+const bundledHelper = path.join(unpacked, 'chrome-sandbox.bundled');
+fs.rmSync(path.join(target, 'chrome-sandbox'));
+fs.copyFileSync(fs.existsSync(bundledHelper) ? bundledHelper : path.join(unpacked, 'chrome-sandbox'), path.join(target, 'chrome-sandbox'));
+fs.rmSync(path.join(target, 'chrome-sandbox.bundled'), { force: true });
+// 安装后由 root 拥有此标准 Chromium 辅助程序；应用自身仍以普通用户运行。
+fs.chmodSync(path.join(target, 'chrome-sandbox'), 0o4755);
+fs.mkdirSync(path.join(stage, 'DEBIAN'));
+fs.writeFileSync(path.join(stage, 'DEBIAN/control'), `Package: studydesk\nVersion: ${version}\nSection: education\nPriority: optional\nArchitecture: amd64\nMaintainer: StudyDesk <local@studydesk.invalid>\nDepends: libgtk-3-0, libnss3, libxss1, libasound2t64 | libasound2, libgbm1, libatk-bridge2.0-0\nDescription: StudyDesk local learning notebook and timer\n A private desktop workspace with focus labels, statistics and calendar review.\n`);
+const desktop = `[Desktop Entry]\nVersion=1.0\nType=Application\nName=StudyDesk\nComment=待办、学习计时、统计与日历\nExec=/opt/studydesk/studydesk %U\nIcon=studydesk\nTerminal=false\nCategories=Education;\nStartupWMClass=StudyDesk\n`;
+fs.mkdirSync(path.join(stage, 'usr/share/applications'), { recursive: true });
+fs.writeFileSync(path.join(stage, 'usr/share/applications/local.studydesk.app.desktop'), desktop);
+fs.mkdirSync(path.join(stage, 'usr/share/icons/hicolor/512x512/apps'), { recursive: true });
+fs.copyFileSync(path.join(root, 'assets/studydesk-icon.png'), path.join(stage, 'usr/share/icons/hicolor/512x512/apps/studydesk.png'));
+const filename = path.join(release, `StudyDesk-${version}-amd64.deb`);
+execFileSync('dpkg-deb', ['--build', '--root-owner-group', '-Zxz', stage, filename], { stdio: 'inherit' });
+fs.rmSync(stage, { recursive: true });
+console.log(filename);
