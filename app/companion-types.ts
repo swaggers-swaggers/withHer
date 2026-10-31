@@ -6,6 +6,7 @@ export type CompanionState = {
   config: { model: string };
   credentials: { configured: boolean; storage: 'encrypted' | 'session'; error: string };
   busy: boolean;
+  waiting?: boolean;
   engine: { status: string; error: string; paused: boolean; studyMemoryError: string };
 };
 export type CompanionEvent = { type: 'state' | 'error' | 'delivered' | 'open-chat'; conversationId?: string; content?: string; message?: string; autonomous?: boolean; popup?: boolean };

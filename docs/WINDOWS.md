@@ -26,13 +26,14 @@ npm start
 ```powershell
 npm run package:win
 npm run test:smoke
+npm run test:packaged-chat
 ```
 
 产物位于 `release/`：`*-nsis.exe` 是安装向导，`*-portable.exe` 是免安装程序，`win-unpacked/StudyDesk.exe` 是供开发检查的未封装目录。若只需生成未封装目录，使用 `npm run pack`。
 
 NSIS 默认按当前用户安装，不需要为日常运行申请管理员权限；可选择安装目录并建立桌面与开始菜单入口。卸载配置不会主动删除应用数据。免安装指无需安装应用，其数据仍写入 `%APPDATA%\StudyDesk`，不随 exe 一起移动。
 
-仓库的 `.github/workflows/build.yml` 在 Windows runner 上执行依赖安装、隐私检查、合成测试、构建、打包与空白数据启动检查，成功后提供 `StudyDesk-Windows-x64` artifact。也可从 Actions 手动触发。构建产物会按工作流设置到期，代码仓库不存储 exe。
+仓库的 `.github/workflows/build.yml` 在 Windows runner 上执行依赖安装、隐私检查、合成测试、构建、打包、空白数据启动及合成聊天检查，成功后提供 `StudyDesk-Windows-x64` artifact。也可从 Actions 手动触发。构建产物会按工作流设置到期，代码仓库不存储 exe。
 
 项目未提供代码签名证书，系统可能提示无法识别发布者。请核对来源和构建记录；本文不要求关闭 Defender、SmartScreen 或其他系统防护。
 

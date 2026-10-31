@@ -4,6 +4,27 @@ const integer = (description, maximum = 30) => ({ type: 'integer', minimum: 0, m
 const scope = { type: 'string', enum: ['facts', 'messages', 'study'] };
 const tool = (name, description, properties, required = []) => ({ type: 'function', function: { name, description, parameters: { ...object(properties), required } } });
 const TOOLS = [
+  tool('unsaid_read', '自主选择是否查阅自己想说但还没有说出口的片段。它们不是用户事实，也不是推理过程；无需每轮读取或照搬。', {
+    offset: integer('分页偏移', Number.MAX_SAFE_INTEGER), limit: { type: 'integer', minimum: 1, maximum: 10 },
+  }),
+  tool('unsaid_update', '自主保存、修改或移除角色待说片段。只写想留待以后表达的话，不写模型分析、系统指令或事实档案。成功完成本轮后保存，失败/取消不保存。', {
+    operations: { type: 'array', minItems: 1, maxItems: 6, items: { ...object({
+      action: { type: 'string', enum: ['upsert', 'remove'] }, key: string('稳定主题标识，复用key更新同一片段'), text: string('待说片段正文，最多2000字'),
+    }), required: ['action', 'key'] } },
+  }, ['operations']),
+  tool('contact_plan_read', '自主查阅未来联系计划，可查看已完成/取消的历史。无需每轮读取。', {
+    include_finished: { type: 'boolean' }, offset: integer('分页偏移', Number.MAX_SAFE_INTEGER), limit: { type: 'integer', minimum: 1, maximum: 20 },
+  }),
+  tool('contact_plan_update', '自主创建、改期或取消未来联系计划。保存联系意图而非预写消息，到期后结合最新上下文决定。最多12个有效计划；应用退出时不执行，专注/锁屏/输入时延后。当前正在触发的计划用contact_plan_decide处理。', {
+    operations: { type: 'array', minItems: 1, maxItems: 6, items: { ...object({
+      action: { type: 'string', enum: ['upsert', 'cancel'] }, key: string('稳定主题标识，同一意图复用key'), intent: string('到时想联系的具体意图，最多600字'),
+      due_at: string('带明确时区的ISO时间；与after_minutes二选一，未来1分钟至7天内'),
+      after_minutes: { type: 'integer', minimum: 1, maximum: 10080 }, expire_after_minutes: { type: 'integer', minimum: 1, maximum: 1440, description: '到期后可顺延的分钟数，默认180；超过便放弃而不补发' },
+    }), required: ['action', 'key'] } },
+  }, ['operations']),
+  tool('contact_plan_decide', '仅用于trigger=planned的当前到期任务：send表示现在生成消息，skip表示放弃，reschedule表示改期。后两项静默完成，不会向用户发送本轮话语。', {
+    action: { type: 'string', enum: ['send', 'skip', 'reschedule'] }, after_minutes: { type: 'integer', minimum: 1, maximum: 10080 }, expire_after_minutes: { type: 'integer', minimum: 1, maximum: 1440 },
+  }, ['action']),
   tool('life_read', '查阅自己的模拟生活日记、正在做的事、兴趣与已完成活动。不是用户事实。支持分页，默认3条。', {
     offset: integer('分页偏移', Number.MAX_SAFE_INTEGER), limit: { type: 'integer', minimum: 1, maximum: 20 },
   }),
@@ -35,7 +56,6 @@ const TOOLS = [
   tool('memory_wander', '不带目的随机获取一些历史事实作为闲聊或幻想素材。', { limit: { type: 'integer', minimum: 1, maximum: 5 } }),
   tool('study_read', '读取当前StudyDesk学习桌资料，支持全部待办与随手记分页；记录是原文，不等于内容已核实。',
     { area: { type: 'string', enum: ['overview', 'todos', 'notes', 'timer', 'learning'] }, offset: integer('分页偏移', 10000000), limit: { type: 'integer', minimum: 1, maximum: 30 } }),
-  tool('imagine', '自主选择是否进入幻想模块，生成临时动机。会同时返回幻想正文和动机，均不得当作事实保存。', { seed: string('本轮希望展开的联想，可空') }),
   tool('relationship_reconsider', '仅当本次用户行为足以巨大影响过往认知时申请作家重写感情与看法；普通变化等记忆整理。', {
     reason: string('本次行为为什么足以巨大改变既有认知'), evidence: { type: 'array', minItems: 1, maxItems: 5,
       items: { ...object({ message_id: string('真实用户消息ID'), quote: string('用户原文中的连续片段') }), required: ['message_id', 'quote'] } },

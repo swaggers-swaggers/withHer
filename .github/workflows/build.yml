@@ -35,6 +35,9 @@ jobs:
       - name: Check packaged Windows startup with an empty profile
         if: runner.os == 'Windows'
         run: npm run test:smoke
+      - name: Check packaged Windows conversation with synthetic responses
+        if: runner.os == 'Windows'
+        run: npm run test:packaged-chat
       - name: Upload Windows packages
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4

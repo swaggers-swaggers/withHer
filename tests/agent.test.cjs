@@ -11,6 +11,7 @@ const { DeepSeek, visibleReply } = require('../electron/agent/deepseek.cjs');
 const { validateFacts, FactMemory } = require('../electron/agent/memory.cjs');
 const { Relationship, evidenceFor } = require('../electron/agent/relationship.cjs');
 const { Motivation, BASE, validateMotives } = require('../electron/agent/motivation.cjs');
+const { Imagination } = require('../electron/agent/imagination.cjs');
 const { StudyReader } = require('../electron/agent/study.cjs');
 const { OnlineInfo } = require('../electron/agent/news.cjs');
 const { eligible } = require('../electron/agent/scheduler.cjs');
@@ -27,7 +28,7 @@ const narrative = '我开始慢慢懂得他对安静的坚持。那不是疏远�
 function setup(t, options = {}) {
   const dir = folder(), events = [], wire = [];
   const engine = new DafeyuEngine(dir, vault, { emit: e => events.push(e), presence: () => ({ available: true, focus: false }), studySnapshot: snapshot,
-    remoteFetch: async (url, input) => { wire.push({ url, request: JSON.parse(input.body) }); return completion(); }, ...options });
+    remoteFetch: async (url, input) => { wire.push({ url, request: JSON.parse(input.body) }); return completion(); }, ...options, settings: { reply_delay_probability: 0, fantasy_probability: 0, ...options.settings } });
   t.after(async () => { await engine.stop(); engine.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { engine, dir, events, wire };
 }
@@ -135,9 +136,9 @@ test('base motives persist while custom motives can be added or removed during b
   engine.store.setMeta('custom_motives', validateMotives([])); assert.deepEqual(m.presets(), BASE);
   assert.throws(() => validateMotives([{ id: 'bad', text: 'x', weight: 0 }]));
 });
-test('imagination returns both literary fantasy and motive without writing facts', async t => {
-  const { engine } = setup(t); const m = new Motivation(engine.store, { object: async () => ({ fantasy: '如果云朵也有课表，今天就偷偷旷一节。', motive: '和他开一个云朵的玩笑' }) });
-  const result = await m.imagine({ news: [] }); assert.ok(result.fictional); assert.ok(result.fantasy); assert.ok(result.motive); assert.equal(engine.store.factContext().length, 0);
+test('probabilistic imagination returns fantasy without requiring or storing a motive', async t => {
+  const { engine } = setup(t); const m = new Imagination(engine.store, { object: async () => ({ fantasy: '如果云朵也有课表，今天就偷偷旷一节。' }) }, { ...defaults, fantasy_probability: 1 }, () => 0);
+  const result = await m.sample({ news: [] }); assert.ok(result.fictional); assert.ok(result.fantasy); assert.equal(result.motive, undefined); assert.equal(engine.store.factContext().length, 0);
 });
 const schedule = patch => eligible({ now: 20_000_000, startedAt: 1, lastEvent: 19_000_000, lastAttempt: 0, presence: { available: true, focus: false }, busy: false, paused: false, typingUntil: 0, settings: defaults, random: () => 1, ...patch });
 test('proactive contact is guaranteed after three hours even when RNG rejects probability', () => {
@@ -206,13 +207,14 @@ test('real tool loop preserves thinking, reads StudyDesk and publishes only the 
   assert.ok(!JSON.stringify(engine.state()).includes('PRIVATE REASONING')); assert.ok(!JSON.stringify(engine.state()).includes('让我分析'));
   const context = JSON.parse(seen[0].messages[1].content); assert.ok(context.relationship); assert.ok(context.motive.text);
 });
-test('imagination tool passes fantasy and temporary motive into the actual final reply request', async t => {
-  let turn = 0; let received = false;
-  const { engine } = setup(t, { remoteFetch: async (_, input) => {
+test('probabilistic imagination is optional context in the actual reply request and leaves the base motive independent', async t => {
+  let received = false;
+  const { engine } = setup(t, { settings: { fantasy_probability: 1 }, random: () => 0, remoteFetch: async (_, input) => {
     const b = JSON.parse(input.body);
-    if (b.response_format) return completion(JSON.stringify({ fantasy: '云朵变成小鱼', motive: '分享一个小鱼梦' }));
-    if (!turn++) return completion(null, { tool_calls: [call('imagine', { seed: '云朵' })] }, 'tool_calls');
-    received = b.messages.some(m => m.role === 'tool' && m.content.includes('云朵变成小鱼') && m.content.includes('分享一个小鱼梦'));
+    if (b.response_format) return completion(JSON.stringify({ fantasy: '云朵变成小鱼' }));
+    const c = JSON.parse(b.messages[1].content);
+    received = c.imagination.fantasy === '云朵变成小鱼' && c.motive.id === 'cheer';
+    assert.ok(!b.tools.some(t => t.function.name === 'imagine'));
     return completion('我刚刚在想，云朵要是小鱼就好了。');
   } });
   await engine.start(); await engine.command('chat.send', { content: '想点好玩的' }); await idle(engine);

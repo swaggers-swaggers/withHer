@@ -233,7 +233,7 @@ else {
       event.preventDefault();companionStopped=true;
       // A local engine may stop within the same microtask turn. Re-entering
       // app.quit before Electron finishes the first quit event is ignored.
-      void companion.stop().finally(()=>setImmediate(()=>app.quit()));
+      void companion.stop({ preservePending: true }).finally(()=>setImmediate(()=>app.quit()));
     }
   });
   app.on('will-quit', () => {

@@ -1,7 +1,7 @@
 {
   "name": "studydesk",
   "productName": "StudyDesk",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "待办、学习计时、统计与日历",
   "author": "StudyDesk",
   "private": true,
@@ -18,12 +18,14 @@
     "pack": "npm run build && node scripts/package-app.cjs dir",
     "package:win": "npm run build && node scripts/package-app.cjs win",
     "check:privacy": "node scripts/check-privacy.cjs",
-    "test:portable": "node --experimental-strip-types tests/run.cjs && node tests/agent.test.cjs && node tests/chat-presentation.test.cjs && node tests/credential-vault.test.cjs",
+    "test:portable": "node --experimental-strip-types tests/run.cjs && node tests/agent.test.cjs && node tests/chat-presentation.test.cjs && node tests/credential-vault.test.cjs && node tests/conversation.test.cjs",
     "test:smoke": "node tests/packaged-smoke.cjs",
     "install:local": "node scripts/install-local.cjs",
     "package:deb": "node scripts/package-deb.cjs",
     "test:agent": "node tests/agent.test.cjs",
-    "test:chat": "node tests/agent.test.cjs && node tests/chat-presentation.test.cjs"
+    "test:chat": "node tests/agent.test.cjs && node tests/chat-presentation.test.cjs",
+    "test:conversation": "node tests/conversation.test.cjs",
+    "test:packaged-chat": "node tests/packaged-conversation.cjs"
   },
   "build": {
     "appId": "local.studydesk.app",

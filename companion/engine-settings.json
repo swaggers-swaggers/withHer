@@ -25,5 +25,12 @@
   "news_topics": ["科技 人工智能 科学 生活 趣闻"],
   "life_enabled": true,
   "life_pause_ms": 2700000,
-  "life_retry_ms": 900000
+  "life_retry_ms": 900000,
+  "fantasy_probability": 0.25,
+  "reply_delay_probability": 0.75,
+  "reply_delay_min_ms": 15000,
+  "reply_delay_max_ms": 180000,
+  "delivery_max_age_ms": 21600000,
+  "contact_plan_retry_ms": 300000,
+  "contact_plan_min_gap_ms": 120000
 }

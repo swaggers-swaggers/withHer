@@ -1,4 +1,3 @@
-const { prompt, persona } = require('./config.cjs');
 const BASE = Object.freeze([
   { id: 'cheer', text: '逗用户开心', weight: 1 },
   { id: 'curious', text: '关心好奇用户生活', weight: 1 },
@@ -19,13 +18,6 @@ class Motivation {
   choose() {
     const presets = this.presets(); let at = this.rng() * presets.reduce((n, m) => n + m.weight, 0);
     return presets.find(m => (at -= m.weight) < 0) || presets[0];
-  }
-  async imagine(context, signal) {
-    const directory = this.provider.settings?.prompt_directory;
-    const value = await this.provider.object(prompt('imagination', directory), { persona: persona(directory), relationship: this.store.relationship()?.narrative,
-      current: context, memories: this.store.wander(3, this.rng) }, signal);
-    if (typeof value.fantasy !== 'string' || !value.fantasy.trim() || value.fantasy.length > 1800 || typeof value.motive !== 'string' || !value.motive.trim() || value.motive.length > 300) throw new Error('幻想内容格式无效');
-    return { fantasy: value.fantasy.trim(), motive: value.motive.trim(), temporary: true, fictional: true };
   }
 }
 module.exports = { Motivation, BASE, validateMotives };

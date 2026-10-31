@@ -42,9 +42,13 @@ class AgentStore {
         search_query TEXT NOT NULL DEFAULT '',sources_json TEXT NOT NULL DEFAULT '[]',shared_at INTEGER,
         origin TEXT NOT NULL DEFAULT 'simulation');
       CREATE INDEX IF NOT EXISTS life_status_time ON life_activities(status,started_at);
+      CREATE TABLE IF NOT EXISTS delivery_outbox(id TEXT PRIMARY KEY,source_message_id TEXT,source_seq INTEGER,
+        baseline_seq INTEGER,kind TEXT NOT NULL,plan_id TEXT,content TEXT NOT NULL,payload_json TEXT NOT NULL,
+        due_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,sent_at INTEGER);
+      CREATE INDEX IF NOT EXISTS delivery_pending ON delivery_outbox(status,due_at);
       CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL);`);
     if (!this.db.prepare('PRAGMA table_info(messages)').all().some(c => c.name === 'reply_to_seq')) this.db.exec('ALTER TABLE messages ADD COLUMN reply_to_seq INTEGER');
-    this.db.prepare("UPDATE messages SET status='interrupted' WHERE status='pending'").run();
+    this.db.prepare("UPDATE messages SET status='interrupted' WHERE status='pending' AND id NOT IN (SELECT source_message_id FROM delivery_outbox WHERE status='pending' AND source_message_id IS NOT NULL)").run();
     if (!this.meta('legacy_import')) this.importLegacy(dataDir);
     if (!this.relationship()) this.saveRelationship({ narrative: '我还在慢慢认识他。先听他说，也保留自己的判断。我愿意温柔地接住他的心情，偶尔调皮一下；亲近到什么程度，要看真正相处留下的感觉，不能凭空替两个人写好过去。', reason: '新引擎初始状态，无未经证实的人物标签。' }, [], 'initial', Date.now());
   }
@@ -171,8 +175,8 @@ class AgentStore {
     throw new Error('查找范围无效');
   }
   exportData() {
-    const tables = ['messages', 'facts', 'study_records', 'relationship_versions', 'batches', 'news', 'metadata', 'life_activities'];
-    return { engine: 'Dafeyu', schema: 1, ...Object.fromEntries(tables.map(t => [t, this.db.prepare(`SELECT * FROM ${t}`).all()])) };
+    const tables = ['messages', 'facts', 'study_records', 'relationship_versions', 'batches', 'news', 'metadata', 'life_activities', 'delivery_outbox'];
+    return { engine: 'Dafeyu', schema: 2, ...Object.fromEntries(tables.map(t => [t, this.db.prepare(`SELECT * FROM ${t}`).all()])) };
   }
   close() { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); this.db.close(); }
 }
